@@ -12,10 +12,9 @@ authors = [
 license = {file = "LICENSE"}
 readme = "README.md"
 dependencies = [
-    "rich"
+    "rich>=14.0.0"
     "pydantic>=2.10.4",
 ]
-
 
 [project.urls]
 Repository = "https://github.com/SocAIty/meseex"
