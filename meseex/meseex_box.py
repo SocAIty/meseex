@@ -1,4 +1,3 @@
-import asyncio
 import time
 from typing import Dict, Callable, Union, List
 import threading
@@ -348,18 +347,6 @@ class MeseexBox:
             self._worker_thread.start()
             self._is_running = True
 
-    async def start_async(self):
-        """Start the MeseexBox asynchronously"""
-        if not self._worker_thread:
-            self._worker_thread = threading.Thread(target=self._process_meekz_in_background, daemon=True)
-
-        if not self._worker_thread.is_alive():
-            self._worker_thread.start()
-            # Wait for thread to be fully started
-            while not self._worker_thread.is_alive():
-                await asyncio.sleep(0.01)
-            self._is_running = True
-
     def shutdown(self, graceful: bool = True):
         """
         Shut down the MeseexBox.
@@ -420,9 +407,9 @@ class MeseexBox:
 
     async def __aenter__(self):
         """Async context manager entry"""
-        await self.start()
+        self.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
-        await self.shutdown()
+        self.shutdown()

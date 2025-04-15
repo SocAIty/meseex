@@ -42,7 +42,6 @@ def cook(meex: MrMeseex) -> MrMeseex:  #
 
 # Create a MeseexBox with task methods. 
 meseex_box = MeseexBox({"prepare": prepare,"process": process})
-
 # Summon a Mr. Meseex to do your tasks
 meex = meseex_box.summon({"meal": "Salisbury bteak"}, "Mr. MeCoox")
 
@@ -56,16 +55,16 @@ result = meex.wait_for_result() # or if you prefer to use it in sync context
 
 ```python
 from meseex import MeseexBox, gather_results
-
 # Create a MeseexBox
 meseex_box = MeseexBox(task_methods)
-
 # Summon multiple Mr. Meseexes
 meCookz = [meseex_box.summon({"meal": f"steak_{i}"}) for i in range(25)]
-
-# Gather all results
+# Gather all results. Note you can also use - gather_results_async to fully leverage asyncio.
 results = gather_results(meCookz)
 ```
+
+Checkout the test files for more complete examples.
+
 
 ## 🧠 The Philosophy of Mr. Meseex
 
@@ -112,19 +111,17 @@ This example demonstrates:
 import asyncio
 import time
 import random
-from meseex import MeseexBox, MrMeseex, gather_results
+from meseex import MeseexBox, MrMeseex, gather_results_async
 
 # Define task functions (sync and async)
 async def prepare_meal(meex: MrMeseex):
-    # Access initial input
-    meal = meex.input["meal"]
+    meal = meex.input["meal"]  # Access initial input
     meex.set_task_progress(0.5, f"Prepping {meal}...")
     await asyncio.sleep(random.uniform(0.5, 1.5))
     return f"Prepared {meal}"
 
 async def cook_meal(meex: MrMeseex):
-    # Access previous task's output
-    preparation = meex.prev_task_output
+    preparation = meex.prev_task_output  # Access previous task's output
     meex.set_task_progress(0.2, "Heating the pan...")
     time.sleep(random.uniform(0.5, 1.5))
     meex.set_task_progress(0.7, "Searing nicely...")
@@ -141,7 +138,7 @@ async with MeseexBox({"Prepare": prepare_meal, "Cook": cook_meal}) as meseex_box
         for i in range(5) # Let's cook 5 steaks in parallel
     ]
     # Gather results asynchronously
-    results = await gather_results(meCookz, raise_on_error=True)
+    results = await gather_results_async(meCookz, raise_on_error=True)
     print("\n--- Cooking Complete! ---")
     for name, result in results.items():
         print(f"{name}: {result}")

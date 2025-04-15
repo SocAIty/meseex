@@ -90,7 +90,7 @@ class MrMeseex:
         self.n_tasks = len(tasks) if isinstance(tasks, list) else 1
         self.current_task_index = -1  # -1 means the job is not started yet
         # Stores the metadata of each task by task index
-        self.task_metadata: Dict[int, TaskMeta] = {-1: TaskMeta(started_at=datetime.now(timezone.utc))}  
+        self.task_metadata: Dict[int, TaskMeta] = {-1: TaskMeta(started_at=datetime.now(timezone.utc))}
         
         # Data the tasks can store
         self.task_data = {}
