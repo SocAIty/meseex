@@ -8,7 +8,7 @@
 
 **Meseex** is a task orchestration framework for Python that helps you manage parallel workflows with elegance and style. 
 
-Mr. Meseex exists to fulfill tasks and then vanishes from existence.
+Mr. Meseex exists to fulfill tasks and then vanishes from existence. ```--Me Seeks``` 
 
 ## 🚀 Features
 
@@ -17,6 +17,7 @@ Mr. Meseex exists to fulfill tasks and then vanishes from existence.
 - **Schwifty Progress Tracking**: Real-time visual progress with a rich terminal UI.
 - **Thread-safe Operations**: No interdimensional cable-level tangles in your threads.
 - **Robust Error Handling**: Capture errors with precision without creating a Cronenberg situation.
+- **Control Flows**: Comes with builtin decorators for example for Polling.
 - **Lightweight**: Blazingly fast. Tiny codebase. Minimal dependencies.
 
 
@@ -77,18 +78,8 @@ Like their Rick and Morty inspiration, Mr. Meseexes:
 
 But unlike the show version, our Meseexes are perfectly happy existing for complex, long-running tasks!
 
-## 👁️ Vision
 
-We believe Meseex is an essential building block for further development in agentic AI. The project provides infrastructure for:
-
-- Building autonomous agent workflows.
-- Supporting parallel execution with LLMs and genAI services.
-- Giving the Meekz (Mr. Meseexes) truly agentic behavior.
-- Running in Model Context Protocol (MCP)
-
-Think of it as a portal gun for your tasks - opening doorways to efficient parallel processing dimensions.
-
-## 🏢 Why is [Socaity.ai](https://www.socaity.ai) Creating This?
+## 🏢 Why is [Socaity.ai](https://www.socaity.ai) creating This?
 
 At [Socaity.ai](https://www.socaity.ai), we're using Meseex in our projects:
 
@@ -97,6 +88,17 @@ At [Socaity.ai](https://www.socaity.ai), we're using Meseex in our projects:
 - **[fastSDK](https://github.com/SocaIty/fastsdk)**: Easily consuming APIs with minimal code.
 
 We are working on an Agent and Agentic Workflow framework that leverags the Meseex architecutre.
+
+
+### 👁️ Vision
+
+We believe Meseex is an essential building block for further development in agentic AI. The project provides a evolvable infrastructure for:
+
+- Building autonomous agent workflows.
+- Supporting parallel execution with LLMs and genAI services.
+- Giving the Meekz (Mr. Meseexes) truly agentic behavior.
+- Running in Model Context Protocol (MCP)
+
 
 ## 📊 Advanced Examples
 
