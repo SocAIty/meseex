@@ -28,20 +28,30 @@ class TaskMeta(BaseModel):
         return (left_at - self.entered_at).total_seconds() * 1000
 
 
-class TaskError(Exception):
-    """Exception raised for job errors"""
-    def __init__(self, message: str = None, task: str = None, original_error: Exception = None):
-        if not message and not original_error:
-            raise ValueError("message or original_error must be provided")
+class TaskException(Exception):
+    """
+    Base exception class for all Meseex-related exceptions.
 
-        if not message:
-            message = str(original_error)
-        
+    All exceptions in the Meseex package should inherit from this class.
+    This allows for easier catching and handling of Meseex-specific errors.
+    """
+    def __init__(
+        self,
+        message: str,
+        task: Optional[str] = None,
+        original_error: Optional[Exception] = None
+    ):
         self.message = message
         self.task = task
         self.original_error = original_error
         self.timestamp = datetime.now(timezone.utc)
-        super().__init__(self.message)
+
+        # Build a descriptive message
+        full_message = message
+        if task:
+            full_message = f"Task '{task}' failed: {message}"
+
+        super().__init__(full_message)
 
 
 class MrMeseex:
@@ -91,7 +101,10 @@ class MrMeseex:
         self.current_task_index = -1  # -1 means the job is not started yet
         # Stores the metadata of each task by task index
         self.task_metadata: Dict[int, TaskMeta] = {-1: TaskMeta(started_at=datetime.now(timezone.utc))}
-        
+        # Stores the signal metadata of each task by task index
+        # This is used for state handling for signals like PollAgain, Retry, etc.
+        self.task_signal_metadata: Dict[int, Dict[str, Any]] = {}
+
         # Data the tasks can store
         self.task_data = {}
         self.set_task_data(data)
@@ -100,7 +113,7 @@ class MrMeseex:
         # Will be set to true when the job finishes
         self.termination_state: Union[TerminationState, None] = None
         # Stores the errors that occurred in each task
-        self._errors: List[TaskError] = []
+        self._errors: List[TaskException] = []
         
     def next_task(self) -> Enum:
         """Move to the next task in the sequence."""
@@ -163,6 +176,54 @@ class MrMeseex:
         except ValueError:
             raise ValueError(f"Invalid task value: {task}")
 
+    def has_task_data(self, key: Any) -> bool:
+        """
+        Check if data exists for a specific key in the current task.
+        
+        Args:
+            key: The key to check for existence
+            
+        Returns:
+            bool: True if the key exists in the current task data
+        """
+        return key in self.task_data
+
+    def clear_task_data(self, key: Any) -> None:
+        """
+        Remove data stored with a specific key.
+        
+        Args:
+            key: The key to remove from task data
+        """
+        if key in self.task_data:
+            del self.task_data[key]
+
+    def get_task_signal(self, signal_name: str = None) -> Union[Dict[str, Any], Any, None]:
+        """
+        Retrieve signal metadata.
+        If signal_name is None, returns all signal metadata for the current task.
+        """
+        if signal_name is None or signal_name == "":
+            return self.task_signal_metadata.get(self.current_task_index, {})
+        
+        return self.task_signal_metadata.get(self.current_task_index, {}).get(signal_name)
+    
+    def set_task_signal(self, signal_name: str, signal_value: Any):
+        """
+        Set signal metadata for the current task.
+        """
+        if self.current_task_index not in self.task_signal_metadata:
+            self.task_signal_metadata[self.current_task_index] = {}
+
+        self.task_signal_metadata[self.current_task_index][signal_name] = signal_value
+
+    def clear_task_signal(self, signal_name: str):
+        """
+        Clear signal metadata for the current task.
+        """
+        if signal_name in self.task_signal_metadata[self.current_task_index]:
+            del self.task_signal_metadata[self.current_task_index][signal_name]
+
     def set_task_output(self, output: Any):
         self.task_outputs[self.current_task_index] = output
 
@@ -174,23 +235,35 @@ class MrMeseex:
     def input(self) -> Any:
         return self.get_task_data(-1)
 
-    def set_error(self, error: Exception) -> bool:
+    def set_error(self, error: Union[str, Exception], task: Optional[str] = None) -> bool:
         """
         Record an error and update the job's state.
         Subclassing can override this method to handle errors differently.
         
         Args:
-            error: The exception that occurred
-            
+            error: The exception that occurred or error message
+            task: Optional task name if not already included in the error
+                
         Returns:
             bool: True if the job should be terminated
         """
-        # Create a proper TaskError with all details
-        task_error = TaskError(
-            task=self.tasks[self.current_task_index] if self.tasks else str(self.current_task_index),
-            message=str(error),
-            original_error=error
-        )
+        # Convert string errors to MeseexException
+        if isinstance(error, str):
+            task_error = TaskException(
+                message=error,
+                task=task or self.tasks[self.current_task_index] if self.tasks else str(self.current_task_index)
+            )
+        # Keep MeseexExceptions as is
+        elif isinstance(error, TaskException):
+            task_error = error
+        # Wrap other exceptions in MeseexException
+        else:
+            task_error = TaskException(
+                message=str(error),
+                task=task or self.tasks[self.current_task_index] if self.tasks else str(self.current_task_index),
+                original_error=error
+            )
+        
         self._errors.append(task_error)
         self.termination_state = TerminationState.FAILED
         
@@ -200,7 +273,7 @@ class MrMeseex:
             
         return True
 
-    def get_errors(self) -> List[TaskError]:
+    def get_errors(self) -> List[TaskException]:
         """Get all errors associated with this job"""
         return self._errors.copy()
 
@@ -292,7 +365,7 @@ class MrMeseex:
         return self.termination_state is not None
     
     @property
-    def error(self) -> Union[TaskError, None]:
+    def error(self) -> Union[TaskException, None]:
         """
         Get the last error that occurred in the job. None if no error occurred.
         """

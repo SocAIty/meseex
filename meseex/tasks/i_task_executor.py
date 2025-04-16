@@ -8,7 +8,7 @@ class ITaskExecutor(ABC):
     """Interface for task executors that can run both sync and async tasks"""
     
     @abstractmethod
-    def submit(self, method: Callable, *args, callback: Optional[Callable] = None) -> AsyncTask:
+    def submit(self, method: Callable, *args, callback: Optional[Callable] = None, delay_s: Optional[float] = None) -> AsyncTask:
         """Submit a task to be executed"""
         pass
     

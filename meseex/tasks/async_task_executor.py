@@ -48,23 +48,22 @@ class AsyncTaskExecutor(ITaskExecutor):
             future.add_done_callback(_callback)
         return future
 
-    def submit(self, method: Coroutine, callback: callable = None, delay: float = None) -> AsyncTask:
+    def submit(self, method: Coroutine, callback: callable = None, delay_s: float = None) -> AsyncTask:
         """
         Submits a coroutine to be executed asynchronously.
 
         Args:
-            coro: An async function to be executed asynchronously.
+            method: An async function to be executed asynchronously.
             callback: A callback function to be called when the coroutine is done.
-            delay: The delay in seconds before the coroutine is executed.
-            method_params: A dictionary of parameters to be passed to the coroutine.
+            delay_s: The delay in seconds before the coroutine is executed.
 
         Returns:
-            A Future object representing the server_response of the coroutine.
+            An AsyncTask object representing the task.
         """
         self._ensure_event_loop_running()
         future = concurrent.futures.Future()
 
-        async_job = AsyncTask(future=future, coro=method, delay=delay)
+        async_job = AsyncTask(future=future, coro=method, delay_s=delay_s)
         future = self._add_callback(async_job, future, callback)
 
         self.loop.call_soon_threadsafe(asyncio.create_task, async_job.run())

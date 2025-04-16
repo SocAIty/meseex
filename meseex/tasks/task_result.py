@@ -55,19 +55,19 @@ class AsyncTask(TaskResult):
             future: Future,
             coro,
             coro_timeout: int = 60,
-            delay: float = None
+            delay_s: float = None
     ):
         super().__init__()
         self._future = future
         self._coro = coro
         self.coro_timeout = coro_timeout
-        self.delay = delay
+        self.delay_s = delay_s
 
     async def run(self):
         """Run the async task"""
         try:
-            if self.delay is not None:
-                await asyncio.sleep(self.delay)
+            if self.delay_s is not None:
+                await asyncio.sleep(self.delay_s)
 
             result = await self._coro
             self._set_result(result)

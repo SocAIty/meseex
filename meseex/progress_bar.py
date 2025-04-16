@@ -10,7 +10,7 @@ from rich import box
 from rich.table import Table
 from rich.columns import Columns
 
-from meseex import MrMeseex
+from meseex.mr_meseex import MrMeseex
 
 
 class ProgressBar:
@@ -461,7 +461,7 @@ class ProgressBar:
 
     def _create_progress_display(self, meseex: MrMeseex) -> str:
         """Creates either a progress bar or spinner for task progress."""
-        if meseex.task_progress and meseex.task_progress.percent is not None:
+        if meseex.task_progress and meseex.task_progress.percent is not None and meseex.task_progress.percent > 0.0:
             # Create a mini progress bar
             percent = meseex.task_progress.percent
             width = 15 # Reduced width for text display

@@ -71,7 +71,7 @@ def test_custom_phase_order():
     job_manager.summon_meseex(job)
     
     # Wait for job to complete
-    time.sleep(1)
+    job.wait_for_result()
     
     # Verify results
     assert job.is_terminal
@@ -103,12 +103,9 @@ def test_job_manager_with_errors():
     job_manager = MeseexBox(phase_methods)
     
     job = job_manager.summon("test", "Mr. Error")
-    
-    # Wait for job to fail
-    time.sleep(1)
-    
+    job.wait_for_result()
     # Verify job failed and only completed first phase
-    assert job.meseex_id in job_manager.failed_meekz
+    assert job.meseex_id in job_manager.meseex_store.failed_ids
     assert job.result is None
     assert job.task_outputs == {0: "phase1"}
     assert job.error is not None

@@ -1,36 +1,14 @@
 import time
-from typing import Dict, Callable, Union, List
+from typing import Dict, Callable, Union, List, Optional
 import threading
-from datetime import datetime, timezone
-
-from meseex import MrMeseex
+from .utils import _expects_mr_meseex_param
+from meseex.control_flow import Repeat
 from meseex.tasks import AsyncTask, TaskExecutor
 from meseex.progress_bar import ProgressBar
-from meseex.mr_meseex import TerminationState
+from meseex.mr_meseex import TerminationState, MrMeseex
 from meseex.meseex_store import MeseexStore
 import signal
-
-
-class TaskError(Exception):
-    """Exception raised for job errors"""
-    def __init__(self, message: str = None, task: str = None, original_error: Exception = None):
-        if not message and not original_error:
-            raise ValueError("message or original_error must be provided")
-
-        if not message:
-            message = str(original_error)
-        
-        self.message = message
-        self.task = task
-        self.original_error = original_error
-        self.timestamp = datetime.now(timezone.utc)
-        
-        # Preserve the original traceback if available
-        if original_error and hasattr(original_error, '__traceback__'):
-            self.__cause__ = original_error
-            self.__traceback__ = original_error.__traceback__
-        
-        super().__init__(self.message)
+import traceback
 
 
 class MeseexBox:
@@ -112,13 +90,11 @@ class MeseexBox:
     def _handle_task_error(self, meseex: MrMeseex, async_task: AsyncTask):
         if not async_task.error:
             return
-        
-        terminate_meseex = meseex.set_error(async_task.error)
+
+        error = async_task.error
+        terminate_meseex = meseex.set_error(error)
         if terminate_meseex is None or terminate_meseex:
-            # Update meseex state to failed
             self.meseex_store.fail_meseex(meseex.meseex_id)
-            
-            # Ensure the UI is updated with the failed state
             snapshot = self.meseex_store.get_state_snapshot()
             self.progress_bar.update_progress(
                 snapshot["all_meekz"],
@@ -128,20 +104,43 @@ class MeseexBox:
             )
 
         if self.raise_on_meseex_error:
-            import traceback
             print(f"\nError occurred in {meseex.name} task: {meseex.task}")
             print("Full traceback:")
-            traceback.print_exception(type(async_task.error), async_task.error, async_task.error.__traceback__)
+            traceback.print_exception(type(error), error, error.__traceback__)
             self.shutdown(graceful=False)
             return  # Don't continue to next task
+
+    def _run_async(self, method, meseex: MrMeseex, delay_s: Optional[float] = None):
+        """Run a task using the hybrid executor, optionally after a delay. Then init a task transition."""
+        # The callback handles the result transition
+        callback = lambda async_task: self._result_transition(meseex, async_task)
+        # Submit the task via the executor, passing the delay.
+        # If the method expects a MrMeseex parameter, we pass it.
+        if _expects_mr_meseex_param(method):
+            async_task = self.task_executor.submit(method, meseex, callback=callback, delay_s=delay_s)
+        else:
+            async_task = self.task_executor.submit(method, callback=callback, delay_s=delay_s)
         
-    def _result_transition(self, meseex: MrMeseex, async_task: AsyncTask):
-        """Handle task results and transition to next task"""
-        # First check for errors
-        if async_task.error:
-            self._handle_task_error(meseex, async_task)
-            # Check if error handling set terminal state, and update UI
+        self.async_tasks[meseex.meseex_id] = async_task
+        return async_task
+    
+    def _run_task(self, task_name_or_index: Union[str, int], meseex: MrMeseex, delay_s: Optional[float] = None):
+        # Get the task method using the task name or index
+        task_method = None
+        if isinstance(task_name_or_index, int) and task_name_or_index < len(meseex.tasks):
+            task_name = meseex.tasks[task_name_or_index]
+            task_method = self.task_methods.get(task_name)
+        else:
+            task_method = self.task_methods.get(task_name_or_index)
+
+        if not task_method:
+            error_msg = f"No task method found for {meseex.name} task: {task_name_or_index}"
+            print(f"Warning: {error_msg}")
+            meseex.set_error(error_msg, task=str(task_name_or_index))
+            # Handle termination after error
             if meseex.is_terminal:
+                self.meseex_store.terminate_meseex(meseex.meseex_id)
+                # Force UI update to show the failed task
                 snapshot = self.meseex_store.get_state_snapshot()
                 self.progress_bar.update_progress(
                     snapshot["all_meekz"],
@@ -151,29 +150,20 @@ class MeseexBox:
                 )
             return
 
-        # Set result on successful task completion
-        if async_task.result is not None:
-            meseex.set_task_output(async_task.result)
-        
-        # Special case: Check if this is the last task
-        is_final_task = meseex.current_task_index == meseex.n_tasks - 1
-        
-        # Continue to the next task (which may trigger termination)
-        self._continue_to_next_task(meseex)
-        
-        # If it was the final task, ensure UI update shows it as completed
-        if is_final_task and meseex.is_terminal:
-            # Double check termination was handled properly
-            self.meseex_store.terminate_meseex(meseex.meseex_id)
-            
-            # Force additional UI refresh after final task
-            snapshot = self.meseex_store.get_state_snapshot()
-            self.progress_bar.update_progress(
-                snapshot["all_meekz"],
-                snapshot["task_map"],
-                snapshot["completed_ids"],
-                snapshot["failed_ids"]
-            )
+        self._run_async(task_method, meseex, delay_s=delay_s)
+
+    def _result_transition(self, meseex: MrMeseex, async_task: AsyncTask):
+        """Handle task results and transition to next task or reschedule polling."""
+        if async_task.error:
+            self._handle_task_error(meseex, async_task)
+            return
+
+        task_result = async_task.result
+        if isinstance(task_result, Repeat):
+            self._run_task(meseex.current_task_index, meseex, delay_s=task_result.delay_s)
+        else:
+            meseex.set_task_output(task_result)
+            self._continue_to_next_task(meseex)
 
     def _continue_to_next_task(self, meseex: MrMeseex):
         """Helper method to continue Mr. Meseex to next task"""
@@ -184,14 +174,19 @@ class MeseexBox:
         new_task = meseex.next_task()
         
         # Handle terminal state immediately and return early
+        # This happens when the task has a different or shortened task order.
+        # Update progress bar and meseex store
         if meseex.is_terminal:
             # First update task mapping to remove from previous task
             if prev_task in self.meseex_store.task_map:
                 self.meseex_store.update_meseex_task(meseex.meseex_id, prev_task, None)
             
             # Then mark as terminated
-            self.meseex_store.terminate_meseex(meseex.meseex_id)
-            
+            if meseex.error is not None:
+                self.meseex_store.fail_meseex(meseex.meseex_id)
+            else:
+                self.meseex_store.terminate_meseex(meseex.meseex_id)
+
             # Force an immediate UI update
             snapshot = self.meseex_store.get_state_snapshot()
             self.progress_bar.update_progress(
@@ -206,42 +201,7 @@ class MeseexBox:
         if prev_task != new_task:
             self.meseex_store.update_meseex_task(meseex.meseex_id, prev_task, new_task)
          
-        # Get the task method using the task name or index
-        task_method = None
-        if isinstance(new_task, int) and new_task < len(meseex.tasks):
-            task_name = meseex.tasks[new_task]
-            task_method = self.task_methods.get(task_name)
-        else:
-            task_method = self.task_methods.get(new_task)
-
-        if not task_method:
-            error_msg = f"No task method found for {meseex.name} task: {new_task}"
-            print(f"Warning: {error_msg}")
-            meseex.set_error(TaskError(message=error_msg, task=str(new_task)))
-            # Handle termination after error
-            if meseex.is_terminal:
-                self.meseex_store.terminate_meseex(meseex.meseex_id)
-                # Force UI update to show the failed task
-                snapshot = self.meseex_store.get_state_snapshot()
-                self.progress_bar.update_progress(
-                    snapshot["all_meekz"],
-                    snapshot["task_map"],
-                    snapshot["completed_ids"],
-                    snapshot["failed_ids"]
-                )
-            return
-
-        self._run_async(task_method, meseex)
-
-    def _run_async(self, method, meseex: MrMeseex):
-        """Run a task using the hybrid executor"""
-        async_task = self.task_executor.submit(
-            method,
-            meseex,
-            callback=lambda async_task: self._result_transition(meseex, async_task)
-        )
-        self.async_tasks[meseex.meseex_id] = async_task
-        return async_task
+        self._run_task(new_task, meseex)
 
     def summon(self, params=None, meseex_name: str = None) -> MrMeseex:
         """
@@ -393,17 +353,6 @@ class MeseexBox:
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=5.0)
                 self._worker_thread = None
-
-    async def shutdown_async(self):
-        """Shutdown the MeseexBox asynchronously"""
-        self.task_executor.shutdown(wait=True)
-        self.progress_bar.stop()
-
-        self._shutdown.set()
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=5.0)
-            self._worker_thread = None
-        self._is_running = False
 
     async def __aenter__(self):
         """Async context manager entry"""

@@ -144,6 +144,41 @@ async with MeseexBox({"Prepare": prepare_meal, "Cook": cook_meal}) as meseex_box
         print(f"{name}: {result}")
 ```
 
+### Control flows
+Control flows allow you to modify the default sequential task execution behavior using signals. This enables more complex workflows like polling, retries, and conditional branching.
+
+This example shows how to use the @polling_task decorator to make a call to a asynchronous task api like (FastTaskAPI services) as easy as simple.
+
+```python
+from meseex.control_flow import polling_task, PollAgain
+
+class FakeExternalService:
+    def __init__(self):
+        self.number_of_polls = 0
+        self.data = {}
+
+    async def get_data(self) -> str:
+        self.number_of_polls += 1
+        await sleep(1)
+        if self.number_of_polls > 3:
+            return "completed"
+        else:
+            return (self.number_of_polls - 1) * 0.33
+        
+@polling_task(timeout_seconds=10, poll_interval_seconds=0.1)
+async def poll_task(meex: MrMeseex):
+    data = await fakeService.get_data()
+    if data == "completed":
+        return data
+    else:
+        meex.set_task_progress(data, "API Working")
+        return PollAgain()
+
+```
+The polling task can than be added to a usual flow in a MeseexBox.
+In this case it will call the service until "completed" is returned and also show a progress bar..
+
+
 ## 🔧 API Reference
 
 ### MrMeseex
@@ -166,14 +201,14 @@ meex.total_duration_ms # duration of all tasks in milliseconds.
 meex.task_meta # Gives you statistic object; with execution time (duration_ms), progress, entered_at, left_at properties.
 ```
 
-### MeseexBox
+
 
 ## 🔄 Error Handling
 
 Meseex provides robust error handling out of the box:
 
 ```python
-from meseex import MeseexBox, MrMeseex, TaskError
+from meseex import MeseexBox, MrMeseex, TaskException
 import asyncio
 
 # Task that will raise an error
