@@ -300,10 +300,8 @@ class MeseexBox:
         queued Mr. Meseex instances and manages their lifecycle. It's called automatically
         when summoning Mr. Meseex instances, but can be called manually if needed.
         """
-        if not self._worker_thread:
+        if not self._worker_thread or not self._worker_thread.is_alive():
             self._worker_thread = threading.Thread(target=self._process_meekz_in_background, daemon=True)
-
-        if not self._worker_thread.is_alive():
             self._worker_thread.start()
             self._is_running = True
 

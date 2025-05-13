@@ -1,6 +1,7 @@
 import time
 import asyncio
-from typing import Callable, Optional, TypeVar
+import inspect
+from typing import Callable, Optional, TypeVar, Any, Tuple, Dict
 
 from meseex.mr_meseex import MrMeseex, TaskException
 from meseex.control_flow.signals import TaskSignal, Repeat
@@ -101,7 +102,7 @@ def _get_or_create_polling_state(meex: MrMeseex, poll_interval_s: float, timeout
     return state
 
 
-def _handle_poll_again(meex: MrMeseex, result: T, state: PollingState, func: Callable[[MrMeseex], T]):
+def _handle_poll_again(meex: MrMeseex, result: T, state: PollingState, func: Callable) -> T:
     if not isinstance(result, PollAgain):
         meex.clear_task_data(POLLING_STATE_KEY)
         meex.set_task_progress(None, "Polling completed")
@@ -119,7 +120,13 @@ def _handle_poll_again(meex: MrMeseex, result: T, state: PollingState, func: Cal
     return Repeat(delay_s=state.poll_interval)
 
 
-def polling_task(poll_interval_seconds: float = 1.0, timeout_seconds: float = 300.0) -> Callable[[Callable[[MrMeseex], T]], Callable[[MrMeseex], T]]:
+def _is_class_method(func: Callable) -> bool:
+    """Check if function is a class method by examining first parameter."""
+    sig = inspect.signature(func)
+    return bool(sig.parameters) and next(iter(sig.parameters.values())).name in ('self', 'cls')
+
+        
+def polling_task(poll_interval_seconds: float = 1.0, timeout_seconds: float = 300.0) -> Callable[[Callable], Callable]:
     """
     Transforms a function into a polling task that automatically retries until success or timeout.
     
@@ -127,7 +134,7 @@ def polling_task(poll_interval_seconds: float = 1.0, timeout_seconds: float = 30
     - Return a value on success
     - Return PollAgain to continue polling
     
-    Works with both async and sync functions.
+    Works with both async and sync functions, and supports both regular functions and class methods.
     
     Example:
         @polling_task(poll_interval_seconds=5, timeout_seconds=60)
@@ -136,6 +143,13 @@ def polling_task(poll_interval_seconds: float = 1.0, timeout_seconds: float = 30
             if status in ("COMPLETED", "FAILED"):
                 return status  # Success, return final status
             return PollAgain(f"Job status: {status}")  # Continue polling
+
+        # Also works with class methods:
+        class MyService:
+            @polling_task(poll_interval_seconds=2)
+            async def poll_endpoint(self, meex: MrMeseex):
+                # self is properly handled, meex is correctly passed
+                return PollAgain() if not_ready() else result
     
     Args:
         poll_interval_seconds: Time to wait between polling attempts
@@ -144,37 +158,51 @@ def polling_task(poll_interval_seconds: float = 1.0, timeout_seconds: float = 30
     Returns:
         Decorator function that wraps the target function
     """
-    def decorator(func: Callable[[MrMeseex], T]) -> Callable[[MrMeseex], T]:
+    def decorator(func: Callable) -> Callable:
         is_async = asyncio.iscoroutinefunction(func)
-        
-        # Async wrapper for async functions
-        async def async_poll_wrapper(meex: MrMeseex) -> T:
-            state = _get_or_create_polling_state(meex, poll_interval_seconds, timeout_seconds)
+        is_class_method = _is_class_method(func)
+        expects_meex = _expects_mr_meseex_param(func)
             
-            # Call the async function with or without meex parameter
-            if _expects_mr_meseex_param(func):
+        async def async_poll_class_method_wrapper(self, meex: MrMeseex):
+            state = _get_or_create_polling_state(meex, poll_interval_seconds, timeout_seconds)
+            if not expects_meex:
+                result = await func(self)
+            else:
+                result = await func(self, meex)
+                
+            return _handle_poll_again(meex, result, state, func)
+
+        # Async wrapper for async functions
+        async def async_poll_wrapper(meex: MrMeseex):
+            state = _get_or_create_polling_state(meex, poll_interval_seconds, timeout_seconds)  
+            if expects_meex:
                 result = await func(meex)
             else:
                 result = await func()
-            
+
+            # Handle the result for polling continuation
             return _handle_poll_again(meex, result, state, func)
             
-        # Sync wrapper for synchronous functions
-        def sync_poll_wrapper(meex: MrMeseex) -> T:
+        def sync_poll_class_method_wrapper(self, meex: MrMeseex):
             state = _get_or_create_polling_state(meex, poll_interval_seconds, timeout_seconds)
-            
-            # Call the sync function with or without meex parameter
-            if _expects_mr_meseex_param(func):
+            if not expects_meex:
+                result = func(self)
+            else:
+                result = func(self, meex)
+            return _handle_poll_again(meex, result, state, func)
+
+        def sync_poll_wrapper(meex: MrMeseex):
+            state = _get_or_create_polling_state(meex, poll_interval_seconds, timeout_seconds)
+            if expects_meex:
                 result = func(meex)
             else:
                 result = func()
-                
             return _handle_poll_again(meex, result, state, func)
         
         # Return the appropriate wrapper based on the function type
-        if is_async:
-            return async_poll_wrapper
+        if is_class_method:
+            return async_poll_class_method_wrapper if is_async else sync_poll_class_method_wrapper
         else:
-            return sync_poll_wrapper
+            return async_poll_wrapper if is_async else sync_poll_wrapper
             
     return decorator

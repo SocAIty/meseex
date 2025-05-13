@@ -160,9 +160,9 @@ class ProgressBar:
         if all_terminated_lines:
             terminated_content = Text("\n").join(all_terminated_lines)
             return Panel(
-                terminated_content, 
-                title="All Tasks Completed", 
-                box=box.ROUNDED, 
+                terminated_content,
+                title="All Tasks Completed",
+                box=box.ROUNDED,
                 border_style="bright_green",
                 expand=True,
                 width=None
@@ -493,7 +493,7 @@ class ProgressBar:
             if f"Task '{task_str}'" not in error_msg and task_str not in error_msg:
                 error_msg = f"Task '{task_str}': {error_msg}"
         # Limit error message length
-        max_len = 50
+        max_len = 200
         if len(error_msg) > max_len:
             error_msg = error_msg[:max_len - 3] + "..."
         return error_msg

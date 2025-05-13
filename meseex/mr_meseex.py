@@ -3,6 +3,7 @@ from typing import Dict, Any, Union, List, Optional, Tuple
 from pydantic import BaseModel
 from enum import Enum, auto
 import time
+import traceback
 import uuid
 
 
@@ -44,6 +45,7 @@ class TaskException(Exception):
         self.message = message
         self.task = task
         self.original_error = original_error
+        self.__traceback__ = getattr(original_error, '__traceback__', None)
         self.timestamp = datetime.now(timezone.utc)
 
         # Build a descriptive message
@@ -53,6 +55,10 @@ class TaskException(Exception):
 
         super().__init__(full_message)
 
+    def print_traceback(self):
+        if self.__traceback__:
+            traceback.print_tb(self.__traceback__)
+        
 
 class MrMeseex:
     """
@@ -231,6 +237,17 @@ class MrMeseex:
     def prev_task_output(self) -> Any:
         return self.task_outputs.get(self.current_task_index - 1)
     
+    def get_task_output(self, task_index_or_name: Union[int, str]) -> Any:
+        if isinstance(task_index_or_name, int):
+            return self.task_outputs.get(task_index_or_name)
+        else:
+            try:
+                task_index = self.tasks.index(task_index_or_name)
+            except ValueError:
+                return None
+
+            return self.task_outputs.get(task_index)
+
     @property
     def input(self) -> Any:
         return self.get_task_data(-1)
@@ -301,6 +318,9 @@ class MrMeseex:
                 return default_value
 
         return self.result
+    
+    # an alias for wait_for_result
+    get_result = wait_for_result
     
     @property
     def task(self):
