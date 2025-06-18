@@ -59,6 +59,8 @@ class TaskException(Exception):
         if self.__traceback__:
             traceback.print_tb(self.__traceback__)
         
+    traceback = print_traceback
+        
 
 class MrMeseex:
     """
@@ -317,11 +319,29 @@ class MrMeseex:
             if time.time() - start_time > timeout_s:
                 return default_value
 
+        if self.termination_state == TerminationState.FAILED:
+            return default_value
+            
         return self.result
     
-    # an alias for wait_for_result
-    get_result = wait_for_result
-    
+    def get_result(self, default_value_on_error: Any = 777, timeout_s: float = None):
+        """
+        Wait for the job to complete and return its result.
+        :param default_value_on_error:
+            If the job fails, it will return this value.
+            If default_value_on_error is 777, it will raise an exception instead of returning a value.
+        :param timeout_s: Maximum time to wait in seconds
+        :return: The result of the job
+        """
+        result = self.wait_for_result(timeout_s, default_value=None)
+        if self.termination_state == TerminationState.FAILED:
+            if default_value_on_error == 777:
+                raise self.error
+            else:
+                return default_value_on_error
+        
+        return result
+
     @property
     def task(self):
         return self.tasks[self.current_task_index] if self.current_task_index >= 0 else self.current_task_index

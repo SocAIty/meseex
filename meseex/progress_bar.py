@@ -42,7 +42,7 @@ class ProgressBar:
                 Text("Starting Mr. Meseex jobs..."),
                 console=self._console,
                 refresh_per_second=10,
-                transient=False, # Keep display after exit
+                transient=False,  # Keep display after exit
                 auto_refresh=True
             )
             self._live.start()
