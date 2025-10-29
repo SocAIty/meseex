@@ -81,11 +81,13 @@ class MeseexBox:
         self.raise_on_meseex_error = raise_on_meseex_error
 
         # Add signal handlers. Needed for shutdown if raise_on_meseex_error
-        def signal_handler(signum, frame):
-            self.shutdown(graceful=False)
-        
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
+        # Only register signal handlers if we're in the main thread
+        if threading.current_thread() is threading.main_thread():
+            def signal_handler(signum, frame):
+                self.shutdown(graceful=False)
+            
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
 
     def _handle_task_error(self, meseex: MrMeseex, async_task: AsyncTask):
         if not async_task.error:
@@ -359,4 +361,7 @@ class MeseexBox:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
+        self.shutdown()
+
+    def __del__(self):
         self.shutdown()
