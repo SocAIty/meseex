@@ -46,7 +46,7 @@ class MeseexBox:
         # Wait for completion
         result = await meseex
     """
-    def __init__(self, task_methods: Union[Dict[Union[int, str], Callable], List[Callable]], raise_on_meseex_error: bool = False):
+    def __init__(self, task_methods: Union[Dict[Union[int, str], Callable], List[Callable]], raise_on_meseex_error: bool = False, progress_verbosity: int = 1):
         """
         Initialize the MeseexBox with task methods.
         
@@ -56,6 +56,10 @@ class MeseexBox:
                          (for named tasks). Each handler method should accept a Mr. Meseex
                          parameter and return the modified Mr. Meseex.
             raise_on_meseex_error: If True, raise an exception if Mr. Meseex has a problem. Only set to true for debugging.
+            progress_verbosity: Influences how often updates are seen on the progress bar. Is for example important in cloud environment to reduce amounts of logs.
+                0 = no progress bar
+                1 = progress bar that shows when a task changes its state or progress.
+                2 = progress bar with spinners (default).
         Example:
             task_methods = {
                 "prepare": prepare_task,    # First task
@@ -74,7 +78,7 @@ class MeseexBox:
         self.async_tasks: Dict[str, AsyncTask] = {}
         self.task_executor = TaskExecutor(max_workers=10)
 
-        self.progress_bar = ProgressBar()
+        self.progress_bar = ProgressBar(progress_verbosity=progress_verbosity)
         self._worker_thread = None
         self._shutdown = threading.Event()
         self._is_running = False
@@ -310,11 +314,15 @@ class MeseexBox:
     def shutdown(self, graceful: bool = True):
         """
         Shut down the MeseexBox.
-        
+
         Args:
             graceful: If True, waits for current tasks to complete.
                     If False, forces immediate termination.
         """
+        # Prevent recursive shutdown calls
+        if self._shutdown.is_set():
+            return
+
         # First, stop accepting new tasks
         self._is_running = False
         self._shutdown.set()

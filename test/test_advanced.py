@@ -6,12 +6,15 @@ from meseex import MeseexBox, MrMeseex, gather_results
 
 class TestingMeseexBox:
     def __init__(self):
-        self.job_manager = MeseexBox({
-            "I'm Mr. Meseex": self.async_phase1,
-            "Golf course": self.async_phase2,
-            1: self.sync_phase2,
-            2: self.async_phase3
-        })
+        self.job_manager = MeseexBox(
+            task_methods={
+                "I'm Mr. Meseex": self.async_phase1,
+                "Golf course": self.async_phase2,
+                1: self.sync_phase2,
+                2: self.async_phase3
+            },
+            progress_verbosity=2
+        )
         self.test_data = "Custom data"
         
     async def async_phase1(self, job: MrMeseex):

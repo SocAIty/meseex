@@ -17,8 +17,19 @@ class ProgressBar:
     """
     Manages progress display using the 'rich' library for concurrent
     Mr. Meseex instances in the console using Panels and Text.
+
+    Args:
+        progress_verbosity: Influences how often updates are seen on the progress bar.
+                           Is for example important in cloud environment to reduce amounts of logs.
+                           0 = no progress bar
+                           1 = progress bar that shows when a task changes its state or progress.
+                           2 = progress bar with spinners (default).
     """
-    def __init__(self):
+    def __init__(self, progress_verbosity: int = 2):
+        if progress_verbosity not in (0, 1, 2):
+            print(f"Invalid progress_verbosity: {progress_verbosity}. Defaulting to 2.")
+            progress_verbosity = 2
+
         self._console = Console(highlight=False, color_system="auto", force_terminal=True)
         self._live: Optional[Live] = None
         self._completed_shown: Set[str] = set()
@@ -29,6 +40,7 @@ class ProgressBar:
         self._compact_mode = False   # Placeholder, not fully implemented in this version
         self._last_display_state = None  # Track last display state to avoid duplicates
         self._max_detailed_jobs = 15  # Maximum number of jobs to show in detailed view
+        self._progress_verbosity = progress_verbosity  # Control progress display verbosity
         
         # Mr. Meeseeks spinner frames - use an even number for balanced animation
         self.SPINNER_FRAMES = [
@@ -51,6 +63,45 @@ class ProgressBar:
         """Update the spinner frame index"""
         self._spinner_frame = (self._spinner_frame + 1) % len(self.SPINNER_FRAMES)
 
+    def _create_display_state_digest(self, meekz, terminated_ids, completed_meekz, failed_meekz, all_finished):
+        """Create a comprehensive state digest for detecting display changes."""
+        state = {
+            'all_finished': all_finished,
+            'completed_count': len(completed_meekz),
+            'failed_count': len(failed_meekz),
+            'active_count': len(meekz) - len(terminated_ids),
+            'terminated_jobs': {},
+            'active_jobs': {}
+        }
+
+        # Track terminated jobs details
+        for meseex_id in sorted(terminated_ids):
+            meseex = meekz.get(meseex_id)
+            if meseex:
+                state['terminated_jobs'][meseex_id] = {
+                    'name': meseex.name,
+                    'completed': meseex_id in completed_meekz,
+                    'runtime_ms': meseex.total_duration_ms,
+                    'error': str(meseex.error) if meseex.error else None,
+                    'task_count': meseex.n_tasks if hasattr(meseex, 'n_tasks') else 0
+                }
+
+        # Track active jobs details
+        for meseex_id, meseex in meekz.items():
+            if meseex_id not in terminated_ids and meseex:
+                state['active_jobs'][meseex_id] = {
+                    'name': meseex.name,
+                    'current_task': str(meseex.task) if meseex.task else None,
+                    'current_task_index': meseex.current_task_index if hasattr(meseex, 'current_task_index') else 0,
+                    'n_tasks': meseex.n_tasks if hasattr(meseex, 'n_tasks') else 0,
+                    'progress': meseex.progress,
+                    'runtime_ms': meseex.total_duration_ms,
+                    'task_progress_percent': meseex.task_progress.percent if meseex.task_progress else None,
+                    'task_progress_message': meseex.task_progress.message if meseex.task_progress else None
+                }
+
+        return state
+
     def update_progress(
             self,
             meekz: Dict[str, MrMeseex],
@@ -67,31 +118,36 @@ class ProgressBar:
             completed_meekz: Set of completed Mr. Meseex instances
             failed_meekz: Set of failed Mr. Meseex instances
         """
+        # If verbosity is 0, don't show any progress bar
+        if self._progress_verbosity == 0:
+            return
+
         now = datetime.now(timezone.utc)
-        # Update spinner frame index consistently regardless of throttling
-        self._update_spinner()
+
+        # Update spinner frame index only when verbosity level 2 (with spinners)
+        if self._progress_verbosity >= 2:
+            self._update_spinner()
 
         # Gather information about task state for quick initial check
         terminated_ids = completed_meekz.union(failed_meekz)
         all_ids = set(meekz.keys())
         all_finished = len(terminated_ids) == len(all_ids) and len(all_ids) > 0
-        
+
         # Create a state digest to detect actual display changes
-        current_state = {
-            'all_finished': all_finished,
-            'completed_count': len(completed_meekz),
-            'failed_count': len(failed_meekz),
-            'active_count': len(all_ids) - len(terminated_ids)
-        }
-        
+        current_state = self._create_display_state_digest(meekz, terminated_ids, completed_meekz, failed_meekz, all_finished)
+
         # Check if any real change happened (ignore spinner-only updates)
         is_real_change = self._last_display_state != current_state
-        
-        # Throttle the actual Rich update calls for performance
-        is_update_due = (now - self._last_update).total_seconds() >= self._update_interval
-        
-        # Only update if either real state change or update is due
-        if not (is_update_due or is_real_change):
+
+        # Throttle the actual Rich update calls for performance (only when verbosity level 2)
+        is_update_due = (self._progress_verbosity >= 2) and (now - self._last_update).total_seconds() >= self._update_interval
+
+        # Update logic depends on verbosity setting:
+        # - Verbosity 2: update for time-based intervals OR real changes (with spinners)
+        # - Verbosity 1: only update for real changes (no spinners)
+        should_update = is_real_change or (self._progress_verbosity >= 2 and is_update_due)
+
+        if not should_update:
             return
             
         # Save current state for future comparisons
@@ -341,9 +397,9 @@ class ProgressBar:
             msg = self._format_error(meseex.error)
         
         return Text.assemble(
-            (f"{meseex.name:<20} ", "cyan"), 
-            status, 
-            (f" Runtime: {run_time:<10}", "magenta"), 
+            (f"{meseex.name:<20} ", "cyan"),
+            status,
+            (f" Runtime: {run_time:<10}", "magenta"),
             (f" {msg}", "yellow")
         )
 
@@ -371,9 +427,9 @@ class ProgressBar:
         if active_lines:
             active_content = Text("\n").join(active_lines)
             return Panel(
-                active_content, 
-                title="Active Jobs", 
-                box=box.ROUNDED, 
+                active_content,
+                title="Active Jobs",
+                box=box.ROUNDED,
                 border_style="blue",
                 expand=True,
                 width=None
@@ -416,9 +472,13 @@ class ProgressBar:
                 task_bar
             )
         
-        # Create spinner for animation
-        spinner = self.SPINNER_FRAMES[self._spinner_frame]
-        
+        # Create spinner or static indicator based on verbosity setting
+        if self._progress_verbosity >= 2:
+            spinner = self.SPINNER_FRAMES[self._spinner_frame]
+            processing_text = f"\n{spinner} Processing {total_active} active jobs..."
+        else:
+            processing_text = f"\nProcessing {total_active} active jobs..."
+
         summary_group = Group(
             Text.assemble(
                 ("Overall Progress: ", "bold cyan"),
@@ -427,7 +487,7 @@ class ProgressBar:
             Text("\nActive Jobs by Task:", style="bold cyan"),
             task_table,
             Text.assemble(
-                (f"\n{spinner} Processing {total_active} active jobs...", "yellow")
+                (processing_text, "yellow")
             )
         )
         
@@ -469,9 +529,12 @@ class ProgressBar:
             bar = f"[{'=' * filled}{' ' * (width - filled)}] {percent * 100:.1f}%"
             return bar
         else:
-            # Show spinner
-            spinner = self.SPINNER_FRAMES[self._spinner_frame]
-            return f"{spinner} working..."
+            # Show spinner or static indicator based on verbosity setting
+            if self._progress_verbosity >= 2:
+                spinner = self.SPINNER_FRAMES[self._spinner_frame]
+                return f"{spinner} working..."
+            else:
+                return "... working"
     
     def stop(self):
         """Stops the Rich Live display cleanly."""
@@ -515,4 +578,3 @@ class ProgressBar:
             h, rem = divmod(int(duration), 3600)
             m, _ = divmod(rem, 60)
             return f"{h}h {m}m"
-
