@@ -307,9 +307,9 @@ class MeseexBox:
         when summoning Mr. Meseex instances, but can be called manually if needed.
         """
         if not self._worker_thread or not self._worker_thread.is_alive():
+            self._is_running = True  # must be before the start method to avoid race condition
             self._worker_thread = threading.Thread(target=self._process_meekz_in_background, daemon=True)
             self._worker_thread.start()
-            self._is_running = True
 
     def shutdown(self, graceful: bool = True):
         """
