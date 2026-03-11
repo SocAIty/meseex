@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
-from typing import Dict, Any, Union, List, Optional, Tuple
+from typing import Dict, Any, Union, List, Optional, Tuple, Callable
 from pydantic import BaseModel
 from enum import Enum, auto
 import time
 import traceback
+import threading
 import uuid
 
 
@@ -122,6 +123,10 @@ class MrMeseex:
         self.termination_state: Union[TerminationState, None] = None
         # Stores the errors that occurred in each task
         self._errors: List[TaskException] = []
+        self._state_lock = threading.RLock()
+        self._cancel_handler: Optional[Callable[..., Any]] = None
+        self._cancel_requested = False
+        self._cancel_result: Any = None
         
     def next_task(self) -> Enum:
         """Move to the next task in the sequence."""
@@ -295,6 +300,79 @@ class MrMeseex:
     def get_errors(self) -> List[TaskException]:
         """Get all errors associated with this job"""
         return self._errors.copy()
+
+    def bind_cancel_handler(self, handler: Callable[..., Any]) -> None:
+        """Register a callback that executes the concrete cancellation logic."""
+        self._cancel_handler = handler
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_requested
+
+    @property
+    def cancel_result(self) -> Any:
+        return self._cancel_result
+
+    def set_cancel_result(self, result: Any) -> None:
+        with self._state_lock:
+            self._cancel_result = result
+
+    def request_cancel(self) -> bool:
+        """
+        Mark the job as cancellation requested.
+
+        Returns:
+            bool: True when the request changed the state, False otherwise.
+        """
+        with self._state_lock:
+            if self.is_terminal:
+                return False
+
+            self._cancel_requested = True
+            return True
+
+    def mark_cancelled(self, cancel_result: Any = None) -> bool:
+        """
+        Transition the job into the cancelled terminal state.
+
+        Returns:
+            bool: True when the job is cancelled after the call, False otherwise.
+        """
+        with self._state_lock:
+            if self.termination_state == TerminationState.CANCELLED:
+                if cancel_result is not None:
+                    self._cancel_result = cancel_result
+                return True
+
+            if self.is_terminal:
+                return False
+
+            self._cancel_requested = True
+            if cancel_result is not None:
+                self._cancel_result = cancel_result
+
+            self.termination_state = TerminationState.CANCELLED
+            finished_at = datetime.now(timezone.utc)
+
+            if self.current_task_index in self.task_metadata:
+                self.task_metadata[self.current_task_index].left_at = finished_at
+            elif -1 in self.task_metadata:
+                self.task_metadata[-1].left_at = finished_at
+
+            return True
+
+    def cancel(self, *args, **kwargs):
+        """
+        Cancel the job.
+
+        Subclasses or orchestrators can register a concrete cancel handler to
+        perform domain-specific work before the job is marked as cancelled.
+        """
+        if self._cancel_handler is not None:
+            return self._cancel_handler(self, *args, **kwargs)
+
+        self.mark_cancelled()
+        return self._cancel_result
 
     def wait_for_result(self, timeout_s: float = None, default_value: Any = None):
         """

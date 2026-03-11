@@ -47,6 +47,10 @@ class TaskResult:
         self._error = error
         self.completed_at = datetime.now(timezone.utc)
 
+    def cancel(self) -> bool:
+        """Best-effort cancellation hook implemented by subclasses."""
+        return False
+
 
 class AsyncTask(TaskResult):
     """Result wrapper for asynchronous tasks"""
@@ -62,6 +66,29 @@ class AsyncTask(TaskResult):
         self._coro = coro
         self.coro_timeout = coro_timeout
         self.delay_s = delay_s
+        self._asyncio_task = None
+        self._cancel_callback = None
+
+    def attach_asyncio_task(self, task: asyncio.Task, cancel_callback=None) -> None:
+        self._asyncio_task = task
+        self._cancel_callback = cancel_callback
+
+    def cancel(self) -> bool:
+        if self.is_completed:
+            return False
+
+        if self._asyncio_task is None:
+            return self._future.cancel()
+
+        if self._asyncio_task.done():
+            return False
+
+        if self._cancel_callback is not None:
+            self._cancel_callback()
+            return True
+
+        self._asyncio_task.cancel()
+        return True
 
     async def run(self):
         """Run the async task"""
@@ -72,6 +99,10 @@ class AsyncTask(TaskResult):
             result = await self._coro
             self._set_result(result)
             self._future.set_result(result)
+        except asyncio.CancelledError as error:
+            self._set_error(error)
+            self._future.cancel()
+            raise
         except Exception as e:
             self._set_error(e)
             self._future.set_exception(e)
@@ -95,3 +126,9 @@ class SyncTask(TaskResult):
             self._set_result(result)
         except Exception as e:
             self._set_error(e)
+
+    def cancel(self) -> bool:
+        if self.is_completed:
+            return False
+
+        return self._future.cancel()

@@ -66,7 +66,16 @@ class AsyncTaskExecutor(ITaskExecutor):
         async_job = AsyncTask(future=future, coro=method, delay_s=delay_s)
         future = self._add_callback(async_job, future, callback)
 
-        self.loop.call_soon_threadsafe(asyncio.create_task, async_job.run())
+        def schedule_task():
+            if async_job._future.cancelled():
+                return
+            task = asyncio.create_task(async_job.run())
+            async_job.attach_asyncio_task(
+                task,
+                cancel_callback=lambda: self.loop.call_soon_threadsafe(task.cancel)
+            )
+
+        self.loop.call_soon_threadsafe(schedule_task)
 
         return async_job
 

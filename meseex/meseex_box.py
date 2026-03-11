@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Callable, Union, List, Optional
+from typing import Dict, Callable, Union, List, Optional, Any
 import threading
 from .utils import _expects_mr_meseex_param
 from meseex.control_flow import Repeat
@@ -93,7 +93,71 @@ class MeseexBox:
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
+    def _refresh_progress(self):
+        snapshot = self.meseex_store.get_state_snapshot()
+        self.progress_bar.update_progress(
+            snapshot["all_meekz"],
+            snapshot["task_map"],
+            snapshot["completed_ids"],
+            snapshot["failed_ids"]
+        )
+
+    @staticmethod
+    def _resolve_meseex_id(meseex_or_id: Union[str, MrMeseex]) -> Optional[str]:
+        if isinstance(meseex_or_id, MrMeseex):
+            return meseex_or_id.meseex_id
+        return meseex_or_id
+
+    def _resolve_meseex(self, meseex_or_id: Union[str, MrMeseex]) -> Optional[MrMeseex]:
+        if isinstance(meseex_or_id, MrMeseex):
+            return meseex_or_id
+        return self.meseex_store.get_meseex(meseex_or_id)
+
+    def _finalize_cancelled_meseex(self, meseex: MrMeseex, cancel_result: Any = None) -> None:
+        if cancel_result is not None:
+            meseex.set_cancel_result(cancel_result)
+
+        meseex.mark_cancelled(cancel_result=cancel_result)
+        self.async_tasks.pop(meseex.meseex_id, None)
+        self.meseex_store.terminate_meseex(meseex.meseex_id)
+        self._refresh_progress()
+
+    def cancel_meseex(self, meseex_or_id: Union[str, MrMeseex], cancel_result: Any = None) -> Optional[MrMeseex]:
+        """
+        Best-effort cancellation for queued or running jobs.
+
+        Queued jobs are terminated immediately. Running async jobs are cancelled
+        directly when possible. Running sync jobs are marked as cancellation
+        requested and will be finalized as soon as the active task completes.
+        """
+        meseex = self._resolve_meseex(meseex_or_id)
+        meseex_id = self._resolve_meseex_id(meseex_or_id)
+        if meseex is None or meseex_id is None:
+            return None
+
+        if cancel_result is not None:
+            meseex.set_cancel_result(cancel_result)
+
+        if meseex.is_terminal:
+            return meseex
+
+        meseex.request_cancel()
+
+        async_task = self.async_tasks.get(meseex_id)
+        if async_task is not None and async_task.cancel():
+            self._finalize_cancelled_meseex(meseex, cancel_result)
+            return meseex
+
+        if meseex_id in self.meseex_store.queued_ids:
+            self._finalize_cancelled_meseex(meseex, cancel_result)
+
+        return meseex
+
     def _handle_task_error(self, meseex: MrMeseex, async_task: AsyncTask):
+        if meseex.cancel_requested or meseex.termination_state == TerminationState.CANCELLED:
+            self._finalize_cancelled_meseex(meseex)
+            return
+
         if not async_task.error:
             return
 
@@ -101,13 +165,7 @@ class MeseexBox:
         terminate_meseex = meseex.set_error(error)
         if terminate_meseex is None or terminate_meseex:
             self.meseex_store.fail_meseex(meseex.meseex_id)
-            snapshot = self.meseex_store.get_state_snapshot()
-            self.progress_bar.update_progress(
-                snapshot["all_meekz"],
-                snapshot["task_map"],
-                snapshot["completed_ids"],
-                snapshot["failed_ids"]
-            )
+            self._refresh_progress()
 
         if self.raise_on_meseex_error:
             print(f"\nError occurred in {meseex.name} task: {meseex.task}")
@@ -131,6 +189,10 @@ class MeseexBox:
         return async_task
     
     def _run_task(self, task_name_or_index: Union[str, int], meseex: MrMeseex, delay_s: Optional[float] = None):
+        if meseex.cancel_requested or meseex.termination_state == TerminationState.CANCELLED:
+            self._finalize_cancelled_meseex(meseex, meseex.cancel_result)
+            return
+
         # Get the task method using the task name or index
         task_method = None
         if isinstance(task_name_or_index, int) and task_name_or_index < len(meseex.tasks):
@@ -146,20 +208,19 @@ class MeseexBox:
             # Handle termination after error
             if meseex.is_terminal:
                 self.meseex_store.terminate_meseex(meseex.meseex_id)
-                # Force UI update to show the failed task
-                snapshot = self.meseex_store.get_state_snapshot()
-                self.progress_bar.update_progress(
-                    snapshot["all_meekz"],
-                    snapshot["task_map"],
-                    snapshot["completed_ids"],
-                    snapshot["failed_ids"]
-                )
+                self._refresh_progress()
             return
 
         self._run_async(task_method, meseex, delay_s=delay_s)
 
     def _result_transition(self, meseex: MrMeseex, async_task: AsyncTask):
         """Handle task results and transition to next task or reschedule polling."""
+        self.async_tasks.pop(meseex.meseex_id, None)
+
+        if meseex.cancel_requested or meseex.termination_state == TerminationState.CANCELLED:
+            self._finalize_cancelled_meseex(meseex, meseex.cancel_result)
+            return
+
         if async_task.error:
             self._handle_task_error(meseex, async_task)
             return
@@ -173,6 +234,10 @@ class MeseexBox:
 
     def _continue_to_next_task(self, meseex: MrMeseex):
         """Helper method to continue Mr. Meseex to next task"""
+        if meseex.cancel_requested or meseex.termination_state == TerminationState.CANCELLED:
+            self._finalize_cancelled_meseex(meseex, meseex.cancel_result)
+            return
+
         # Store previous task for updating the task mapping
         prev_task = meseex.current_task_index
         
@@ -193,14 +258,7 @@ class MeseexBox:
             else:
                 self.meseex_store.terminate_meseex(meseex.meseex_id)
 
-            # Force an immediate UI update
-            snapshot = self.meseex_store.get_state_snapshot()
-            self.progress_bar.update_progress(
-                snapshot["all_meekz"],
-                snapshot["task_map"],
-                snapshot["completed_ids"],
-                snapshot["failed_ids"]
-            )
+            self._refresh_progress()
             return
         
         # Update task mapping for non-terminal state
@@ -251,6 +309,9 @@ class MeseexBox:
         while self.meseex_store.has_queued():
             meseex_id, meseex = self.meseex_store.pop_next_queued()
             if meseex:
+                if meseex.cancel_requested or meseex.termination_state == TerminationState.CANCELLED:
+                    self._finalize_cancelled_meseex(meseex, meseex.cancel_result)
+                    continue
                 self._continue_to_next_task(meseex)
 
     def _process_meekz_in_background(self) -> None:

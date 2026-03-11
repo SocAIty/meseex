@@ -117,9 +117,11 @@ class MeseexStore:
             
             # Now update the state
             if meseex.termination_state == TerminationState.SUCCESS:
+                self._queued = deque(m_id for m_id in self._queued if m_id != meseex_id)
                 self._working.discard(meseex_id)
                 self._completed.add(meseex_id)
             elif meseex.termination_state in (TerminationState.FAILED, TerminationState.CANCELLED):
+                self._queued = deque(m_id for m_id in self._queued if m_id != meseex_id)
                 self._working.discard(meseex_id)
                 self._failed.add(meseex_id)
 
