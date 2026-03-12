@@ -58,7 +58,7 @@ Important responsibilities:
 - call task functions in the right executor
 - manage task-to-task transitions
 - track working/completed/failed jobs in `MeseexStore`
-- coordinate cancellation
+- coordinate cancellation and binding custom handlers
 
 ### `MeseexStore`
 Thread-safe in-memory state store for:
@@ -128,6 +128,25 @@ Cancellation is cooperative and lifecycle-aware.
 
 ### Important implication
 Cancellation is immediate for queued jobs, usually fast for async I/O, and best-effort for CPU-bound or blocking sync functions.
+
+### Cooperative Cancellation in Synchronous Tasks
+For synchronous tasks, which cannot be forcefully interrupted safely in Python, `MrMeseex` provides the `cancel_requested` property. Tasks can periodically check this property to detect if a cancellation has been initiated and then exit gracefully. This allows for controlled cleanup and prevents unexpected behavior.
+
+Example:
+```python
+import time
+from meseex.mr_meseex import MrMeseex
+
+def my_cancellable_task(meseex: MrMeseex):
+    for i in range(100):
+        if meseex.cancel_requested:
+            print(f"Task {meseex.name}: Cancellation requested. Exiting gracefully.")
+            # Perform any necessary cleanup here
+            return "Task cancelled cooperatively"
+        print(f"Task {meseex.name}: Working on item {i}")
+        time.sleep(0.1)
+    return "Task completed"
+```
 
 ## Design Strengths
 - Small surface area

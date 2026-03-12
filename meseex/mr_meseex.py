@@ -111,7 +111,7 @@ class MrMeseex:
         if meseex.is_terminal:
             result = meseex.result
     """
-    def __init__(self, tasks: list = None, data: Any = None, name: str = None):
+    def __init__(self, tasks: list = None, data: Any = None, name: str = None, cancel_handler: Callable[..., Any] = None):
         """
         Initialize a new Mr. Meseex instance.
         
@@ -149,8 +149,8 @@ class MrMeseex:
         # Stores the errors that occurred in each task
         self._errors: List[TaskException] = []
         self._state_lock = threading.RLock()
-        self._cancel_handler: Optional[Callable[..., Any]] = None
-        self._cancel_requested = False
+        self._cancel_handler: Optional[Callable[..., Any]] = cancel_handler
+        self._cancel_event = threading.Event()
         self._cancel_result: Any = None
         
     def next_task(self) -> Enum:
@@ -326,13 +326,9 @@ class MrMeseex:
         """Get all errors associated with this job"""
         return self._errors.copy()
 
-    def bind_cancel_handler(self, handler: Callable[..., Any]) -> None:
-        """Register a callback that executes the concrete cancellation logic."""
-        self._cancel_handler = handler
-
     @property
     def cancel_requested(self) -> bool:
-        return self._cancel_requested
+        return self._cancel_event.is_set()
 
     @property
     def cancel_result(self) -> Any:
@@ -372,7 +368,7 @@ class MrMeseex:
             if self.is_terminal:
                 return False
 
-            self._cancel_requested = True
+            self._cancel_event.set()
             return True
 
     def mark_cancelled(self, cancel_result: Any = None) -> bool:
@@ -382,7 +378,6 @@ class MrMeseex:
         Returns:
             bool: True when the job is cancelled after the call, False otherwise.
         """
-        print(f"DEBUG: MrMeseex.mark_cancelled called")
         with self._state_lock:
             if self.termination_state == TerminationState.CANCELLED:
                 if cancel_result is not None:
@@ -392,10 +387,9 @@ class MrMeseex:
             if self.is_terminal:
                 return False
 
-            self._cancel_requested = True
             if cancel_result is not None:
                 self._cancel_result = cancel_result
-
+            self._cancel_event.set()
             self.termination_state = TerminationState.CANCELLED
             finished_at = datetime.now(timezone.utc)
 
@@ -413,7 +407,6 @@ class MrMeseex:
         Subclasses or orchestrators can register a concrete cancel handler to
         perform domain-specific work before the job is marked as cancelled.
         """
-        print(f"DEBUG: MrMeseex.cancel called")
         if self._cancel_handler is not None:
             return self._cancel_handler(self, *args, **kwargs)
 

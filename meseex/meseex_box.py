@@ -282,7 +282,8 @@ class MeseexBox:
         Returns:
             MrMeseex: The created Mr. Meseex instance
         """
-        meseex = MrMeseex(tasks=list(self.task_methods.keys()), data=params, name=meseex_name)
+        meseex = MrMeseex(tasks=list(self.task_methods.keys()), data=params, name=meseex_name, cancel_handler=self.cancel_meseex)
+
         self.meseex_store.add_to_queue(meseex)
         self.start()
         return meseex
@@ -300,6 +301,7 @@ class MeseexBox:
         Returns:
             MrMeseex: The added Mr. Meseex instance
         """
+        meseex._cancel_handler = self.cancel_meseex
         self.meseex_store.add_to_queue(meseex)
         self.start()
         return meseex
