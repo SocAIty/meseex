@@ -99,7 +99,8 @@ class MeseexBox:
             snapshot["all_meekz"],
             snapshot["task_map"],
             snapshot["completed_ids"],
-            snapshot["failed_ids"]
+            snapshot["failed_ids"],
+            snapshot["cancelled_ids"]
         )
 
     @staticmethod
@@ -338,7 +339,8 @@ class MeseexBox:
                         snapshot["all_meekz"],
                         snapshot["task_map"],
                         snapshot["completed_ids"],
-                        snapshot["failed_ids"]
+                        snapshot["failed_ids"],
+                        snapshot["cancelled_ids"]
                     )
                 
                 # Store state for next iteration
@@ -413,7 +415,8 @@ class MeseexBox:
                 snapshot["all_meekz"],
                 snapshot["task_map"],
                 snapshot["completed_ids"],
-                snapshot["failed_ids"]
+                snapshot["failed_ids"],
+                snapshot["cancelled_ids"]
             )
             
             # Now stop the progress bar display

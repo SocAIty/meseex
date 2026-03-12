@@ -17,6 +17,7 @@ class MeseexStore:
         self._working: Set[str] = set()
         self._completed: Set[str] = set()
         self._failed: Set[str] = set()
+        self._cancelled: Set[str] = set()
         # Task to Meseex ID mapping
         self._task_meekz: Dict[Any, Set[str]] = {}
 
@@ -120,10 +121,14 @@ class MeseexStore:
                 self._queued = deque(m_id for m_id in self._queued if m_id != meseex_id)
                 self._working.discard(meseex_id)
                 self._completed.add(meseex_id)
-            elif meseex.termination_state in (TerminationState.FAILED, TerminationState.CANCELLED):
+            elif meseex.termination_state == TerminationState.FAILED:
                 self._queued = deque(m_id for m_id in self._queued if m_id != meseex_id)
                 self._working.discard(meseex_id)
                 self._failed.add(meseex_id)
+            elif meseex.termination_state == TerminationState.CANCELLED:
+                self._queued = deque(m_id for m_id in self._queued if m_id != meseex_id)
+                self._working.discard(meseex_id)
+                self._cancelled.add(meseex_id)
 
     def remove_meseex(self, meseex_id: str) -> None:
         """Remove a Meseex completely from all collections"""
@@ -133,6 +138,7 @@ class MeseexStore:
             self._working.discard(meseex_id)
             self._completed.discard(meseex_id)
             self._failed.discard(meseex_id)
+            self._cancelled.discard(meseex_id)
             
             # Remove from task mapping
             meseex = self._meekz.get(meseex_id)
@@ -150,6 +156,7 @@ class MeseexStore:
                 "task_map": {task: set(ids) for task, ids in self._task_meekz.items()},
                 "completed_ids": self._completed.copy(),
                 "failed_ids": self._failed.copy(),
+                "cancelled_ids": self._cancelled.copy(),
                 "working_ids": self._working.copy(),
                 "queued_ids": list(self._queued)
             }
@@ -177,6 +184,12 @@ class MeseexStore:
         """Get all failed Meseex instances"""
         with self._lock:
             return [self._meekz[m_id] for m_id in self._failed]
+
+    @property
+    def cancelled_meekz(self) -> List[MrMeseex]:
+        """Get all cancelled Meseex instances"""
+        with self._lock:
+            return [self._meekz[m_id] for m_id in self._cancelled]
     
     @property
     def task_map(self) -> Dict[Any, Set[str]]:
@@ -214,9 +227,15 @@ class MeseexStore:
         """Get IDs of failed Meseex instances"""
         with self._lock:
             return self._failed.copy()
+
+    @property
+    def cancelled_ids(self) -> Set[str]:
+        """Get IDs of cancelled Meseex instances"""
+        with self._lock:
+            return self._cancelled.copy()
             
     @property
     def terminated_ids(self) -> Set[str]:
         """Get IDs of all terminated (completed or failed) Meseex instances"""
         with self._lock:
-            return self._completed.union(self._failed)
+            return self._completed.union(self._failed).union(self._cancelled)

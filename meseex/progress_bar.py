@@ -63,12 +63,13 @@ class ProgressBar:
         """Update the spinner frame index"""
         self._spinner_frame = (self._spinner_frame + 1) % len(self.SPINNER_FRAMES)
 
-    def _create_display_state_digest(self, meekz, terminated_ids, completed_meekz, failed_meekz, all_finished):
+    def _create_display_state_digest(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished):
         """Create a comprehensive state digest for detecting display changes."""
         state = {
             'all_finished': all_finished,
             'completed_count': len(completed_meekz),
             'failed_count': len(failed_meekz),
+            'cancelled_count': len(cancelled_meekz),
             'active_count': len(meekz) - len(terminated_ids),
             'terminated_jobs': {},
             'active_jobs': {}
@@ -107,7 +108,8 @@ class ProgressBar:
             meekz: Dict[str, MrMeseex],
             task_meekz: Dict[any, Set[str]],
             completed_meekz: Set[str],
-            failed_meekz: Set[str]
+            failed_meekz: Set[str],
+            cancelled_meekz: Set[str] = None
     ):
         """
         Update the progress display using Rich Panels and Text.
@@ -117,7 +119,10 @@ class ProgressBar:
             task_meekz: The Mr. Meseex instances in each task by id
             completed_meekz: Set of completed Mr. Meseex instances
             failed_meekz: Set of failed Mr. Meseex instances
+            cancelled_meekz: Set of cancelled Mr. Meseex instances
         """
+        if cancelled_meekz is None:
+            cancelled_meekz = set()
         # If verbosity is 0, don't show any progress bar
         if self._progress_verbosity == 0:
             return
@@ -129,12 +134,12 @@ class ProgressBar:
             self._update_spinner()
 
         # Gather information about task state for quick initial check
-        terminated_ids = completed_meekz.union(failed_meekz)
+        terminated_ids = completed_meekz.union(failed_meekz).union(cancelled_meekz)
         all_ids = set(meekz.keys())
         all_finished = len(terminated_ids) == len(all_ids) and len(all_ids) > 0
 
         # Create a state digest to detect actual display changes
-        current_state = self._create_display_state_digest(meekz, terminated_ids, completed_meekz, failed_meekz, all_finished)
+        current_state = self._create_display_state_digest(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished)
 
         # Check if any real change happened (ignore spinner-only updates)
         is_real_change = self._last_display_state != current_state
@@ -156,7 +161,7 @@ class ProgressBar:
         self._ensure_display_started()
 
         # Prepare renderables for display
-        renderables = self._prepare_renderables(meekz, terminated_ids, completed_meekz, failed_meekz, all_finished)
+        renderables = self._prepare_renderables(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished)
         
         # Update the live display
         self._update_live_display(renderables)
@@ -169,16 +174,16 @@ class ProgressBar:
             # Clear the live display before updating to avoid stale content
             self._live.update(display_group)
 
-    def _prepare_renderables(self, meekz, terminated_ids, completed_meekz, failed_meekz, all_finished):
+    def _prepare_renderables(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished):
         """Prepare renderables for display based on current state."""
         renderables = []
         
         if all_finished:
-            all_completed_panel = self._prepare_all_completed_panel(meekz, terminated_ids, completed_meekz, failed_meekz)
+            all_completed_panel = self._prepare_all_completed_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
             if all_completed_panel:
                 renderables.append(all_completed_panel)
         else:
-            terminated_panel = self._prepare_terminated_panel(meekz, terminated_ids, completed_meekz, failed_meekz)
+            terminated_panel = self._prepare_terminated_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
             active_panel = self._prepare_active_panel(meekz, terminated_ids)
             
             # If both panels exist, show them side by side
@@ -197,19 +202,19 @@ class ProgressBar:
         
         return renderables
 
-    def _prepare_all_completed_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz):
+    def _prepare_all_completed_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
         """Prepare panel for when all tasks are completed."""
         all_terminated_lines = []
         
         # If there are too many jobs, show a summary instead
         if len(terminated_ids) > self._max_detailed_jobs:
-            return self._prepare_summary_completed_panel(meekz, terminated_ids, completed_meekz, failed_meekz)
+            return self._prepare_summary_completed_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
         
         # Sort by name for consistent display
         for meseex_id in sorted(list(terminated_ids), key=lambda m_id: meekz.get(m_id).name if meekz.get(m_id) else m_id):
             meseex = meekz.get(meseex_id)
             if meseex:
-                line = self._create_terminated_job_line(meseex, meseex_id, completed_meekz)
+                line = self._create_terminated_job_line(meseex, meseex_id, completed_meekz, cancelled_meekz)
                 all_terminated_lines.append(line)
         
         # Add the single "All Tasks Completed" panel
@@ -225,12 +230,13 @@ class ProgressBar:
             )
         return None
 
-    def _prepare_summary_completed_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz):
+    def _prepare_summary_completed_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
         """Prepare a summary panel for completed jobs when there are many jobs."""
         # Calculate statistics for completed jobs
         total_jobs = len(terminated_ids)
         completed_jobs = len(completed_meekz)
         failed_jobs = len(failed_meekz)
+        cancelled_jobs = len(cancelled_meekz)
         
         # Calculate average runtime
         total_runtime = 0
@@ -262,6 +268,7 @@ class ProgressBar:
         table.add_row("Total Jobs", str(total_jobs))
         table.add_row("Completed", f"{completed_jobs} ({completed_jobs/total_jobs*100:.1f}%)")
         table.add_row("Failed", f"{failed_jobs} ({failed_jobs/total_jobs*100:.1f}%)")
+        table.add_row("Cancelled", f"{cancelled_jobs} ({cancelled_jobs/total_jobs*100:.1f}%)")
         table.add_row("Avg Runtime", self._format_duration_ms(avg_runtime))
         table.add_row("Max Runtime", self._format_duration_ms(max_runtime))
         table.add_row("Min Runtime", self._format_duration_ms(min_runtime))
@@ -290,19 +297,19 @@ class ProgressBar:
             width=None  # Allow width to be determined by parent container
         )
 
-    def _prepare_terminated_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz):
+    def _prepare_terminated_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
         """Prepare panel for terminated jobs."""
         terminated_lines = []
         
         # If there are too many jobs, show a summary instead
         if len(terminated_ids) > self._max_detailed_jobs:
-            return self._prepare_summary_terminated_panel(meekz, terminated_ids, completed_meekz, failed_meekz)
+            return self._prepare_summary_terminated_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
         
         # Sort by name for consistent display
         for meseex_id in sorted(list(terminated_ids), key=lambda m_id: meekz.get(m_id).name if meekz.get(m_id) else m_id):
             meseex = meekz.get(meseex_id)
             if meseex:
-                line = self._create_terminated_job_line(meseex, meseex_id, completed_meekz)
+                line = self._create_terminated_job_line(meseex, meseex_id, completed_meekz, cancelled_meekz)
                 terminated_lines.append(line)
 
         if terminated_lines:
@@ -317,12 +324,13 @@ class ProgressBar:
             )
         return None
 
-    def _prepare_summary_terminated_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz):
+    def _prepare_summary_terminated_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
         """Prepare a summary panel for terminated jobs when there are many jobs."""
         # Similar to _prepare_summary_completed_panel but for terminated jobs
         total_terminated = len(terminated_ids)
         completed = len(completed_meekz)
         failed = len(failed_meekz)
+        cancelled = len(cancelled_meekz)
         
         table = Table(box=box.MINIMAL)
         table.add_column("Status", style="cyan")
@@ -331,10 +339,12 @@ class ProgressBar:
         
         table.add_row("Completed", str(completed), f"{completed/total_terminated*100:.1f}%")
         table.add_row("Failed", str(failed), f"{failed/total_terminated*100:.1f}%")
+        table.add_row("Cancelled", str(cancelled), f"{cancelled/total_terminated*100:.1f}%")
         
         # Show most recent 5 completed and failed jobs
         recent_completed = []
         recent_failed = []
+        recent_cancelled = []
         
         for meseex_id in terminated_ids:
             meseex = meekz.get(meseex_id)
@@ -343,12 +353,15 @@ class ProgressBar:
                 
             if meseex_id in completed_meekz:
                 recent_completed.append((meseex, meseex.total_duration_ms))
-            else:
+            elif meseex_id in failed_meekz:
                 recent_failed.append((meseex, meseex.total_duration_ms))
+            else:
+                recent_cancelled.append((meseex, meseex.total_duration_ms))
         
         # Sort by most recent (highest duration)
         recent_completed.sort(key=lambda x: x[1], reverse=True)
         recent_failed.sort(key=lambda x: x[1], reverse=True)
+        recent_cancelled.sort(key=lambda x: x[1], reverse=True)
         
         recent_table = Table(title="Most Recent Jobs", box=box.MINIMAL)
         recent_table.add_column("Name", style="cyan")
@@ -370,6 +383,14 @@ class ProgressBar:
                 "✗ Failed",
                 self._format_duration_ms(meseex.total_duration_ms)
             )
+
+        # Add most recent cancellations
+        for meseex, _ in recent_cancelled[:2]:
+            recent_table.add_row(
+                meseex.name,
+                "⊘ Cancelled",
+                self._format_duration_ms(meseex.total_duration_ms)
+            )
         
         summary_group = Group(
             table,
@@ -385,12 +406,15 @@ class ProgressBar:
             width=None  # Allow width to be determined by parent container
         )
 
-    def _create_terminated_job_line(self, meseex, meseex_id, completed_meekz):
+    def _create_terminated_job_line(self, meseex, meseex_id, completed_meekz, cancelled_meekz):
         """Create a line for a terminated job."""
         run_time = self._format_duration_ms(meseex.total_duration_ms)
         
         if meseex_id in completed_meekz:
             status = Text("✓ Completed", style="green")
+            msg = ""
+        elif meseex_id in cancelled_meekz:
+            status = Text("⊘ Cancelled", style="yellow")
             msg = ""
         else: # Failed
             status = Text("✗ Failed", style="red")
