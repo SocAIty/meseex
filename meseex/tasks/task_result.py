@@ -107,6 +107,11 @@ class AsyncTask(TaskResult):
             self._set_error(e)
             self._future.set_exception(e)
             return None
+        finally:
+            # Clean up the coroutine if it was never awaited (e.g. cancelled
+            # during the delay sleep).  Safe no-op on an exhausted coroutine.
+            if asyncio.iscoroutine(self._coro):
+                self._coro.close()
 
         return result
 

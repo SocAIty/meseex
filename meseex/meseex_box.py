@@ -301,7 +301,8 @@ class MeseexBox:
         Returns:
             MrMeseex: The added Mr. Meseex instance
         """
-        meseex._cancel_handler = self.cancel_meseex
+        if meseex._cancel_handler is None:
+            meseex._cancel_handler = self.cancel_meseex
         self.meseex_store.add_to_queue(meseex)
         self.start()
         return meseex
