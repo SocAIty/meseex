@@ -382,6 +382,7 @@ class MrMeseex:
         Returns:
             bool: True when the job is cancelled after the call, False otherwise.
         """
+        print(f"DEBUG: MrMeseex.mark_cancelled called")
         with self._state_lock:
             if self.termination_state == TerminationState.CANCELLED:
                 if cancel_result is not None:
@@ -412,6 +413,7 @@ class MrMeseex:
         Subclasses or orchestrators can register a concrete cancel handler to
         perform domain-specific work before the job is marked as cancelled.
         """
+        print(f"DEBUG: MrMeseex.cancel called")
         if self._cancel_handler is not None:
             return self._cancel_handler(self, *args, **kwargs)
 
