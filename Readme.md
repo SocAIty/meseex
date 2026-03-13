@@ -84,7 +84,7 @@ But unlike the show version, our Meseexes are perfectly happy existing for compl
 At [Socaity.ai](https://www.socaity.ai), we're using Meseex in our projects:
 
 - **[SocaitySDK](https://github.com/SocAIty/socaity)** Use any AI model with a single line of code.
-- **[FastTaskAPI](https://github.com/SocAIty/FastTaskAPI)**: Building APIs for genAI efficiently.
+- **[APIPod](https://github.com/SocAIty/APIPod)**: Building APIs for genAI efficiently.
 - **[fastSDK](https://github.com/SocaIty/fastsdk)**: Easily consuming APIs with minimal code.
 
 We are working on an Agent and Agentic Workflow framework that leverags the Meseex architecutre.
@@ -149,7 +149,7 @@ async with MeseexBox({"Prepare": prepare_meal, "Cook": cook_meal}) as meseex_box
 ### Control flows
 Control flows allow you to modify the default sequential task execution behavior using signals. This enables more complex workflows like polling, retries, and conditional branching.
 
-This example shows how to use the @polling_task decorator to make a call to a asynchronous task api like (FastTaskAPI services) as easy as simple.
+This example shows how to use the @polling_task decorator to make a call to a asynchronous task api like (APIPod services) as easy as simple.
 
 ```python
 from meseex.control_flow import polling_task, PollAgain

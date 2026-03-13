@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
-from typing import Dict, Any, Union, List, Optional, Tuple
+from typing import Dict, Any, Union, List, Optional, Tuple, Callable
 from pydantic import BaseModel
 from enum import Enum, auto
 import time
 import traceback
+import threading
 import uuid
 
 
@@ -62,6 +63,31 @@ class TaskException(Exception):
     traceback = print_traceback
         
 
+class TaskCancelledException(TaskException):
+    """Raised when a MrMeseex reaches the cancelled terminal state."""
+    def __init__(
+        self,
+        message: str = "Job was cancelled",
+        task: Optional[str] = None,
+        cancel_result: Any = None
+    ):
+        self.message = message
+        self.task = task
+        self.cancel_result = cancel_result
+        self.original_error = None
+        self.__traceback__ = None
+        self.timestamp = datetime.now(timezone.utc)
+
+        full_message = message
+        if task:
+            full_message = f"Task '{task}' was cancelled: {message}"
+
+        Exception.__init__(self, full_message)
+
+
+_RETURN_DEFAULT_ON_ERROR = object()
+
+
 class MrMeseex:
     """
     The purpose of Mr. Meseex is to fulfill all its tasks.
@@ -85,7 +111,7 @@ class MrMeseex:
         if meseex.is_terminal:
             result = meseex.result
     """
-    def __init__(self, tasks: list = None, data: Any = None, name: str = None):
+    def __init__(self, tasks: list = None, data: Any = None, name: str = None, cancel_handler: Callable[..., Any] = None):
         """
         Initialize a new Mr. Meseex instance.
         
@@ -122,6 +148,10 @@ class MrMeseex:
         self.termination_state: Union[TerminationState, None] = None
         # Stores the errors that occurred in each task
         self._errors: List[TaskException] = []
+        self._state_lock = threading.RLock()
+        self._cancel_handler: Optional[Callable[..., Any]] = cancel_handler
+        self._cancel_event = threading.Event()
+        self._cancel_result: Any = None
         
     def next_task(self) -> Enum:
         """Move to the next task in the sequence."""
@@ -296,16 +326,103 @@ class MrMeseex:
         """Get all errors associated with this job"""
         return self._errors.copy()
 
-    def wait_for_result(self, timeout_s: float = None, default_value: Any = None):
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_event.is_set()
+
+    @property
+    def cancel_result(self) -> Any:
+        return self._cancel_result
+
+    @property
+    def cancelled_error(self) -> TaskCancelledException:
+        message = "Job was cancelled"
+        cancel_result = self._cancel_result
+        if cancel_result is not None:
+            result_message = getattr(cancel_result, "error", None)
+            if result_message:
+                message = result_message
+
+        task_name = None
+        if self.current_task_index >= 0 and self.current_task_index < len(self.tasks):
+            task_name = self.tasks[self.current_task_index]
+
+        return TaskCancelledException(
+            message=message,
+            task=task_name,
+            cancel_result=cancel_result
+        )
+
+    def set_cancel_result(self, result: Any) -> None:
+        with self._state_lock:
+            self._cancel_result = result
+
+    def request_cancel(self) -> bool:
+        """
+        Mark the job as cancellation requested.
+
+        Returns:
+            bool: True when the request changed the state, False otherwise.
+        """
+        with self._state_lock:
+            if self.is_terminal:
+                return False
+
+            self._cancel_event.set()
+            return True
+
+    def mark_cancelled(self, cancel_result: Any = None) -> bool:
+        """
+        Transition the job into the cancelled terminal state.
+
+        Returns:
+            bool: True when the job is cancelled after the call, False otherwise.
+        """
+        with self._state_lock:
+            if self.termination_state == TerminationState.CANCELLED:
+                if cancel_result is not None:
+                    self._cancel_result = cancel_result
+                return True
+
+            if self.is_terminal:
+                return False
+
+            if cancel_result is not None:
+                self._cancel_result = cancel_result
+            self._cancel_event.set()
+            self.termination_state = TerminationState.CANCELLED
+            finished_at = datetime.now(timezone.utc)
+
+            if self.current_task_index in self.task_metadata:
+                self.task_metadata[self.current_task_index].left_at = finished_at
+            elif -1 in self.task_metadata:
+                self.task_metadata[-1].left_at = finished_at
+
+            return True
+
+    def cancel(self, *args, **kwargs):
+        """
+        Cancel the job.
+
+        Subclasses or orchestrators can register a concrete cancel handler to
+        perform domain-specific work before the job is marked as cancelled.
+        """
+        if self._cancel_handler is not None:
+            return self._cancel_handler(self, *args, **kwargs)
+
+        self.mark_cancelled()
+        return self._cancel_result
+
+    def wait_for_result(self, timeout_s: float = None, default_value_on_error: Any = _RETURN_DEFAULT_ON_ERROR):
         """
         Wait for the job to complete and return its result.
         
         Args:
             timeout_s: Maximum time to wait in seconds
-            default_value: Value to return if the job times out
+            default_value_on_error: Value to return if the job fails or is cancelled
             
         Returns:
-            Any: The job's result or default_value if timed out
+            Any: The job's result or the provided default value
         """
         if timeout_s is None:
             timeout_s = float('inf')
@@ -317,30 +434,32 @@ class MrMeseex:
         while not self.is_terminal:
             time.sleep(0.01)
             if time.time() - start_time > timeout_s:
-                return default_value
+                if default_value_on_error is _RETURN_DEFAULT_ON_ERROR:
+                    return None
+                return default_value_on_error
 
         if self.termination_state == TerminationState.FAILED:
-            return default_value
+            if default_value_on_error is _RETURN_DEFAULT_ON_ERROR:
+                raise self.error
+            return default_value_on_error
+
+        if self.termination_state == TerminationState.CANCELLED:
+            if default_value_on_error is _RETURN_DEFAULT_ON_ERROR:
+                raise self.cancelled_error
+            return default_value_on_error
             
         return self.result
     
-    def get_result(self, default_value_on_error: Any = 777, timeout_s: float = None):
+    def get_result(self, default_value_on_error: Any = _RETURN_DEFAULT_ON_ERROR, timeout_s: float = None):
         """
         Wait for the job to complete and return its result.
         :param default_value_on_error:
-            If the job fails, it will return this value.
-            If default_value_on_error is 777, it will raise an exception instead of returning a value.
+            If the job fails or is cancelled, it will return this value.
+            If not set, it will raise the underlying exception.
         :param timeout_s: Maximum time to wait in seconds
         :return: The result of the job
         """
-        result = self.wait_for_result(timeout_s, default_value=None)
-        if self.termination_state == TerminationState.FAILED:
-            if default_value_on_error == 777:
-                raise self.error
-            else:
-                return default_value_on_error
-        
-        return result
+        return self.wait_for_result(timeout_s=timeout_s, default_value_on_error=default_value_on_error)
 
     @property
     def task(self):
@@ -521,5 +640,5 @@ class MrMeseex:
             else:
                 raise Exception("Job failed")
         elif self.termination_state == TerminationState.CANCELLED:
-            raise Exception("Job was cancelled")
+            raise self.cancelled_error
         return self.result
