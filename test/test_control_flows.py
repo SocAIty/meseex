@@ -50,7 +50,7 @@ def test_polling():
         "test_polling_with_error": failure_poll_task,
     })
     meex = meseex_box.summon({"test": "test"}, "test_meseex")
-    meex.wait_for_result()
+    meex.wait_for_result(default_value_on_error="error")
 
     assert meex.task_outputs[0] == "completed"
     assert isinstance(meex.error, PollingException)

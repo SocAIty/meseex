@@ -103,8 +103,9 @@ def test_job_manager_with_errors():
     job_manager = MeseexBox(phase_methods)
     
     job = job_manager.summon("test", "Mr. Error")
-    job.wait_for_result()
+    result = job.wait_for_result(default_value_on_error="error")
     # Verify job failed and only completed first phase
+    assert result == "error"
     assert job.meseex_id in job_manager.meseex_store.failed_ids
     assert job.result is None
     assert job.task_outputs == {0: "phase1"}
