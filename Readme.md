@@ -246,5 +246,7 @@ GPLv3 - See LICENSE file for details.
 
 ---
 
-<p align="center">Developed with 🧿 by <a href="https://www.socaity.ai">Socaity.ai</a></p>
-<p align="center">Remember: Existence is pain to a Meseex, but task completion brings them joy!</p>
+<p align="center">
+  Made with ❤️ by <a href="https://www.socaity.ai?utm_source=github&utm_content=meseex-20-29-06-2026">SocAIty</a>
+  <p align="center">Remember: Existence is pain to a Meseex, but task completion brings them joy!</p>
+</p>
