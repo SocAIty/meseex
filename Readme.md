@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Meseex logo" height="200" />
+</p>
+
 # Meseex
 
 > "I'm Mr. Meseex! Look at me! I run your tasks in parallel until completion!"
