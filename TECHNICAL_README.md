@@ -24,7 +24,8 @@ Think of the package as three layers:
 
 2. `MeseexBox`
    - The scheduler and lifecycle manager.
-   - Pulls queued jobs, starts their next task, handles transitions, and updates the progress UI.
+   - Pulls queued jobs, starts their next task, and handles transitions.
+   - Progress display subscribes to job events. It does not poll job objects.
 
 3. `TaskExecutor`
    - The execution backend.
@@ -66,7 +67,7 @@ Thread-safe in-memory state store for:
 - queued jobs
 - working jobs
 - terminated jobs
-- task-to-job mappings used by the progress bar
+- task-to-job mappings
 
 ### `TaskExecutor`
 Facade that hides whether a task is sync or async:
@@ -100,6 +101,8 @@ Task outputs are also stored per task, which enables chained workflows:
 `MrMeseex.subscribe(callback, replay=True)` delivers `MeseexEvent` values. Kinds: `started`, `task_changed`, `progress`, `succeeded`, `failed`, `cancelled`.
 
 Events are emitted from the state mutations themselves (`next_task`, `set_task_progress`, `set_error`, `mark_cancelled`). Callbacks run on producer threads, must not block, and never fail the job. `replay=True` delivers the latest snapshot of each kind to a late subscriber.
+
+`ProgressBar` is one subscriber. `MeseexBox` calls `track(job)` on summon. Interactive terminals use Rich Live; spinner frames are computed from wall clock on each Live refresh, not from job mutations. Non-interactive output is one log line per event. No Live, no spinner, no ANSI animation.
 
 ## Error Model
 Errors are normalized into `TaskException`.
