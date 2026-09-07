@@ -17,6 +17,7 @@ Mr. Meseex exists to fulfill tasks and then vanishes from existence. ```--Me See
 - **Schwifty Progress Tracking**: Real-time visual progress with a rich terminal UI.
 - **Thread-safe Operations**: No interdimensional cable-level tangles in your threads.
 - **Robust Error Handling**: Capture errors with precision without creating a Cronenberg situation.
+- **Lifecycle Events**: `subscribe(callback)` observes start, task changes, progress, success, failure, and cancel.
 - **Control Flows**: Comes with builtin decorators for example for Polling.
 - **Lightweight**: Blazingly fast. Tiny codebase. Minimal dependencies.
 
@@ -101,6 +102,18 @@ We believe Meseex is an essential building block for further development in agen
 
 
 ## 📊 Advanced Examples
+
+Subscribe to one job when you need programmatic progress instead of the terminal bar:
+
+```python
+def on_event(event):
+    print(event.kind, event.task, event.message)
+
+meex = meseex_box.summon({"meal": "steak"})
+unsub = meex.subscribe(on_event, replay=True)
+result = meex.wait_for_result()
+unsub()
+```
 
 This example demonstrates:
 - Setting task progress with messages (`set_task_progress`).

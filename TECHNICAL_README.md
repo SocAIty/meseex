@@ -11,6 +11,7 @@ At runtime:
 - Sync tasks run in a thread pool.
 - Async tasks run on a dedicated event loop in a background thread.
 - Results, progress, errors, and cancellation state live on the `MrMeseex`.
+- Subscribers observe those transitions through `MrMeseex.subscribe(...)`.
 
 The package is intentionally small: it is not a general distributed workflow engine, but a local orchestration layer for many concurrent jobs.
 
@@ -86,12 +87,19 @@ This keeps polling logic inside the task while the orchestration loop stays gene
 Progress is stored per task in `TaskMeta` and exposed through:
 - `task_progress`
 - `set_task_progress(...)`
-- `progress`
+- `progress` (includes the current task at its reported percent)
 - `total_duration_ms`
+
+`set_task_progress` emits a `progress` event only when the stored percent or message changes. UI and log throttling belong in subscribers.
 
 Task outputs are also stored per task, which enables chained workflows:
 - task N can read `prev_task_output`
 - consumers can inspect outputs by task name or index
+
+## Lifecycle Events
+`MrMeseex.subscribe(callback, replay=True)` delivers `MeseexEvent` values. Kinds: `started`, `task_changed`, `progress`, `succeeded`, `failed`, `cancelled`.
+
+Events are emitted from the state mutations themselves (`next_task`, `set_task_progress`, `set_error`, `mark_cancelled`). Callbacks run on producer threads, must not block, and never fail the job. `replay=True` delivers the latest snapshot of each kind to a late subscriber.
 
 ## Error Model
 Errors are normalized into `TaskException`.
@@ -165,4 +173,4 @@ Common extension points:
 - add new control-flow helpers in `control_flow`
 - add richer termination semantics on `MrMeseex`
 - improve `MeseexStore` if cancelled jobs should be tracked separately from failed jobs
-- add structured instrumentation around task submission and transitions
+- add new `EventKind` values only when a new state transition exists

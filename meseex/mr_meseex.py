@@ -7,6 +7,8 @@ import traceback
 import threading
 import uuid
 
+from meseex.events import EventDispatcher, EventKind, MeseexEvent
+
 
 class TerminationState(Enum):
     SUCCESS = auto()
@@ -152,7 +154,44 @@ class MrMeseex:
         self._cancel_handler: Optional[Callable[..., Any]] = cancel_handler
         self._cancel_event = threading.Event()
         self._cancel_result: Any = None
-        
+        self.events = EventDispatcher()
+
+    def subscribe(self, callback: Callable[[MeseexEvent], None], replay: bool = True):
+        """Observe lifecycle events. Callbacks run on producer threads and must not block."""
+        return self.events.subscribe(callback, replay=replay)
+
+    def _emit(
+        self,
+        kind: EventKind,
+        *,
+        message: Optional[str] = None,
+        result: Any = None,
+        error: Optional[BaseException] = None,
+        task_progress: Optional[float] = None,
+    ) -> None:
+        current = self.task_progress
+        if task_progress is None and current is not None:
+            task_progress = current.percent
+        if message is None and current is not None:
+            message = current.message
+        task_name = None
+        task_index = None
+        if self.current_task_index >= 0:
+            task_index = self.current_task_index
+            if self.current_task_index < len(self.tasks):
+                task_name = self.tasks[self.current_task_index]
+        self.events.emit(MeseexEvent(
+            kind=kind,
+            meseex_id=self.meseex_id,
+            task=task_name,
+            task_index=task_index,
+            progress=self.progress if self.current_task_index >= 0 else None,
+            task_progress=task_progress,
+            message=message,
+            result=result,
+            error=error,
+        ))
+
     def next_task(self) -> Enum:
         """Move to the next task in the sequence."""
         # Set the progress of the current task to 100%
@@ -165,6 +204,7 @@ class MrMeseex:
             # Record completion time for the final task
             if self.current_task_index >= 0:
                 self.task_metadata[self.current_task_index].left_at = datetime.now(timezone.utc)
+            self._emit(EventKind.SUCCEEDED, result=self.result)
             return self.current_task_index
 
         # Update left_at for current task
@@ -174,7 +214,11 @@ class MrMeseex:
         # Create task metadata for next task
         self.task_metadata[self.current_task_index + 1] = TaskMeta(entered_at=datetime.now(timezone.utc))
 
+        was_unstarted = self.current_task_index < 0
         self.current_task_index += 1
+        if was_unstarted:
+            self._emit(EventKind.STARTED)
+        self._emit(EventKind.TASK_CHANGED)
         return self.current_task_index
 
     def set_task_data(self, data: Any):
@@ -319,7 +363,8 @@ class MrMeseex:
         # Record completion time for the failed task
         if self.current_task_index >= 0:
             self.task_metadata[self.current_task_index].left_at = datetime.now(timezone.utc)
-            
+
+        self._emit(EventKind.FAILED, error=task_error)
         return True
 
     def get_errors(self) -> List[TaskException]:
@@ -398,7 +443,8 @@ class MrMeseex:
             elif -1 in self.task_metadata:
                 self.task_metadata[-1].left_at = finished_at
 
-            return True
+        self._emit(EventKind.CANCELLED, result=self._cancel_result)
+        return True
 
     def cancel(self, *args, **kwargs):
         """
@@ -569,11 +615,15 @@ class MrMeseex:
         
         # Create or update progress
         task_meta = self.task_metadata[self.current_task_index]
-        if task_meta.progress is None:
+        previous = task_meta.progress
+        previous_key = (previous.percent, previous.message) if previous is not None else None
+        if previous is None:
             task_meta.progress = TaskProgress(percent=percent, message=message)
         else:
             task_meta.progress.percent = percent
             task_meta.progress.message = message
+        if previous_key != (percent, message):
+            self._emit(EventKind.PROGRESS, message=message, task_progress=percent)
 
     def set_task_progress(self, percent: float, message: str = None):
         """
@@ -586,15 +636,19 @@ class MrMeseex:
         """
         Get the progress of the job.
         If not specified, every task will contribute equally to the total progress.
+        The current task is included at its reported percent.
         """
         n_tasks = self.n_tasks
-        total_progress = 0
-        for i in range(self.current_task_index):
-            if self.task_metadata[i].progress is None:
-                total_progress += 1 / n_tasks
+        if n_tasks <= 0 or self.current_task_index < 0:
+            return 0.0
+        total_progress = 0.0
+        for i in range(self.current_task_index + 1):
+            meta = self.task_metadata.get(i)
+            if meta is None or meta.progress is None:
+                if i < self.current_task_index:
+                    total_progress += 1.0 / n_tasks
             else:
-                total_progress += self.task_metadata[i].progress.percent / n_tasks
-
+                total_progress += meta.progress.percent / n_tasks
         return total_progress
 
     @property
