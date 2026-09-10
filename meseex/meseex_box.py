@@ -17,7 +17,7 @@ class MeseexBox:
     
     MeseexBox orchestrates the work of Mr. Meseex instances.
     It supports both synchronous and asynchronous task methods.
-    It handles state transitions, progress tracking, and error management.
+    It handles state transitions and error management. Progress display is event-driven.
     
     Example:
         # Define task methods
@@ -56,10 +56,7 @@ class MeseexBox:
                          (for named tasks). Each handler method should accept a Mr. Meseex
                          parameter and return the modified Mr. Meseex.
             raise_on_meseex_error: If True, raise an exception if Mr. Meseex has a problem. Only set to true for debugging.
-            progress_verbosity: Influences how often updates are seen on the progress bar. Is for example important in cloud environment to reduce amounts of logs.
-                0 = no progress bar
-                1 = progress bar that shows when a task changes its state or progress.
-                2 = progress bar with spinners (default).
+            progress_verbosity: 0 silent, 1 state and progress, 2 plus spinner on a TTY.
         Example:
             task_methods = {
                 "prepare": prepare_task,    # First task
@@ -93,16 +90,6 @@ class MeseexBox:
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
-    def _refresh_progress(self):
-        snapshot = self.meseex_store.get_state_snapshot()
-        self.progress_bar.update_progress(
-            snapshot["all_meekz"],
-            snapshot["task_map"],
-            snapshot["completed_ids"],
-            snapshot["failed_ids"],
-            snapshot["cancelled_ids"]
-        )
-
     @staticmethod
     def _resolve_meseex_id(meseex_or_id: Union[str, MrMeseex]) -> Optional[str]:
         if isinstance(meseex_or_id, MrMeseex):
@@ -121,7 +108,6 @@ class MeseexBox:
         meseex.mark_cancelled(cancel_result=cancel_result)
         self.async_tasks.pop(meseex.meseex_id, None)
         self.meseex_store.terminate_meseex(meseex.meseex_id)
-        self._refresh_progress()
 
     def cancel_meseex(self, meseex_or_id: Union[str, MrMeseex], cancel_result: Any = None) -> Optional[MrMeseex]:
         """
@@ -166,7 +152,6 @@ class MeseexBox:
         terminate_meseex = meseex.set_error(error)
         if terminate_meseex is None or terminate_meseex:
             self.meseex_store.fail_meseex(meseex.meseex_id)
-            self._refresh_progress()
 
         if self.raise_on_meseex_error:
             print(f"\nError occurred in {meseex.name} task: {meseex.task}")
@@ -209,7 +194,6 @@ class MeseexBox:
             # Handle termination after error
             if meseex.is_terminal:
                 self.meseex_store.terminate_meseex(meseex.meseex_id)
-                self._refresh_progress()
             return
 
         self._run_async(task_method, meseex, delay_s=delay_s)
@@ -258,8 +242,6 @@ class MeseexBox:
                 self.meseex_store.fail_meseex(meseex.meseex_id)
             else:
                 self.meseex_store.terminate_meseex(meseex.meseex_id)
-
-            self._refresh_progress()
             return
         
         # Update task mapping for non-terminal state
@@ -285,6 +267,7 @@ class MeseexBox:
         meseex = MrMeseex(tasks=list(self.task_methods.keys()), data=params, name=meseex_name, cancel_handler=self.cancel_meseex)
 
         self.meseex_store.add_to_queue(meseex)
+        self.progress_bar.track(meseex)
         self.start()
         return meseex
 
@@ -304,6 +287,7 @@ class MeseexBox:
         if meseex._cancel_handler is None:
             meseex._cancel_handler = self.cancel_meseex
         self.meseex_store.add_to_queue(meseex)
+        self.progress_bar.track(meseex)
         self.start()
         return meseex
 
@@ -319,47 +303,14 @@ class MeseexBox:
                 self._continue_to_next_task(meseex)
 
     def _process_meekz_in_background(self) -> None:
-        """Background thread that processes Meseex instances"""
-        last_active_count = 0
-        last_all_completed = False
-        
+        """Background thread that dequeues and starts jobs. Display is event-driven."""
         while not self._shutdown.is_set() and self._is_running:
             try:
                 self._start_queued_meekz()
-                
-                # Get a snapshot for consistent state
-                snapshot = self.meseex_store.get_state_snapshot()
-                
-                # Detect all jobs completed
-                active_count = len(snapshot["working_ids"]) + len(snapshot["queued_ids"])
-                task_count = len(snapshot["completed_ids"]) + len(snapshot["failed_ids"])
-                all_completed = (active_count == 0) and (task_count > 0)
-                
-                # Only update the UI if there's been a state change or if tasks are still active
-                if (last_active_count != active_count) or (last_all_completed != all_completed) or not all_completed:
-                    # Update the progress bar
-                    self.progress_bar.update_progress(
-                        snapshot["all_meekz"],
-                        snapshot["task_map"],
-                        snapshot["completed_ids"],
-                        snapshot["failed_ids"],
-                        snapshot["cancelled_ids"]
-                    )
-                
-                # Store state for next iteration
-                last_active_count = active_count
-                last_all_completed = all_completed
-                
-                # More responsive shutdown check
-                if self._shutdown.wait(timeout=0.01):
+                if self._shutdown.wait(timeout=0.05):
                     break
-                    
-                # If all completed, slow down the update loop
-                if all_completed:
-                    time.sleep(0.05)
             except Exception as e:
                 if not self._shutdown.is_set():
-                    import traceback
                     print(f"Error in background thread: {e}")
                     traceback.print_exc()
                     raise
@@ -411,18 +362,6 @@ class MeseexBox:
         else:
             # Graceful shutdown
             self.task_executor.shutdown(wait=True)
-            
-            # Force one final UI update to ensure all completed tasks are shown
-            snapshot = self.meseex_store.get_state_snapshot()
-            self.progress_bar.update_progress(
-                snapshot["all_meekz"],
-                snapshot["task_map"],
-                snapshot["completed_ids"],
-                snapshot["failed_ids"],
-                snapshot["cancelled_ids"]
-            )
-            
-            # Now stop the progress bar display
             self.progress_bar.stop()
             
             if self._worker_thread and self._worker_thread.is_alive():

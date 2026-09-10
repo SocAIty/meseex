@@ -1,604 +1,356 @@
-from datetime import datetime, timezone
-from typing import Dict, Set, Optional, List
-from collections import defaultdict, Counter
+"""Event-driven job display. Live UI on a TTY, plain logs otherwise."""
+from __future__ import annotations
 
-from rich.console import Console, Group
-from rich.text import Text
-from rich.panel import Panel
-from rich.live import Live
+import threading
+import time
+from collections import Counter, defaultdict
+from typing import Callable, Dict, List, Optional
+
 from rich import box
-from rich.table import Table
 from rich.columns import Columns
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
-from meseex.mr_meseex import MrMeseex
+from meseex.events import EventKind, MeseexEvent
+from meseex.mr_meseex import MrMeseex, TerminationState
+
+SPINNER_FRAMES = ("╭◕‿◕╮", "\\◕‿◕/", "╰◕‿◕╯", "ᕦ◕‿◕ᕤ", "╰◕‿◕╯", "\\◕‿◕/")
+SPINNER_PERIOD_S = 0.12
+_MAX_DETAILED_JOBS = 15
 
 
 class ProgressBar:
-    """
-    Manages progress display using the 'rich' library for concurrent
-    Mr. Meseex instances in the console using Panels and Text.
+    """Observe ``MrMeseex`` events and render them.
+
+    Interactive terminal: Rich Live. Spinner frames come from wall clock,
+    so Live auto-refresh animates without treating jobs as changed.
+    Non-interactive: one log line per event. No Live, no ANSI animation.
 
     Args:
-        progress_verbosity: Influences how often updates are seen on the progress bar.
-                           Is for example important in cloud environment to reduce amounts of logs.
-                           0 = no progress bar
-                           1 = progress bar that shows when a task changes its state or progress.
-                           2 = progress bar with spinners (default).
+        progress_verbosity: ``0`` silent, ``1`` state and progress only,
+            ``2`` same plus spinner on a TTY.
     """
+
     def __init__(self, progress_verbosity: int = 2):
         if progress_verbosity not in (0, 1, 2):
-            print(f"Invalid progress_verbosity: {progress_verbosity}. Defaulting to 2.")
             progress_verbosity = 2
-
-        self._console = Console(highlight=False, color_system="auto", force_terminal=True)
+        self._verbosity = progress_verbosity
+        self._console = Console(highlight=False)
+        self._interactive = self._console.is_terminal
+        self._animate = self._interactive and progress_verbosity >= 2
+        self._jobs: Dict[str, MrMeseex] = {}
+        self._unsubs: List[Callable[[], None]] = []
+        self._lock = threading.Lock()
         self._live: Optional[Live] = None
-        self._completed_shown: Set[str] = set()
-        self._failed_shown: Set[str] = set()
-        self._spinner_frame = 0
-        self._last_update = datetime.now(timezone.utc)
-        self._update_interval = 0.1  # Interval for spinner animation update
-        self._compact_mode = False   # Placeholder, not fully implemented in this version
-        self._last_display_state = None  # Track last display state to avoid duplicates
-        self._max_detailed_jobs = 15  # Maximum number of jobs to show in detailed view
-        self._progress_verbosity = progress_verbosity  # Control progress display verbosity
-        
-        # Mr. Meeseeks spinner frames - use an even number for balanced animation
-        self.SPINNER_FRAMES = [
-            "╭◕‿◕╮", "\\◕‿◕/", "╰◕‿◕╯", "ᕦ◕‿◕ᕤ", "╰◕‿◕╯", "\\◕‿◕/"
-        ]
 
-    def _ensure_display_started(self):
-        """Starts the rich Live display if not already running."""
-        if self._live is None:
-            self._live = Live(
-                Text("Starting Mr. Meseex jobs..."),
-                console=self._console,
-                refresh_per_second=10,
-                transient=False,  # Keep display after exit
-                auto_refresh=True
-            )
-            self._live.start()
-
-    def _update_spinner(self):
-        """Update the spinner frame index"""
-        self._spinner_frame = (self._spinner_frame + 1) % len(self.SPINNER_FRAMES)
-
-    def _create_display_state_digest(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished):
-        """Create a comprehensive state digest for detecting display changes."""
-        state = {
-            'all_finished': all_finished,
-            'completed_count': len(completed_meekz),
-            'failed_count': len(failed_meekz),
-            'cancelled_count': len(cancelled_meekz),
-            'active_count': len(meekz) - len(terminated_ids),
-            'terminated_jobs': {},
-            'active_jobs': {}
-        }
-
-        # Track terminated jobs details
-        for meseex_id in sorted(terminated_ids):
-            meseex = meekz.get(meseex_id)
-            if meseex:
-                state['terminated_jobs'][meseex_id] = {
-                    'name': meseex.name,
-                    'completed': meseex_id in completed_meekz,
-                    'runtime_ms': meseex.total_duration_ms,
-                    'error': str(meseex.error) if meseex.error else None,
-                    'task_count': meseex.n_tasks if hasattr(meseex, 'n_tasks') else 0
-                }
-
-        # Track active jobs details
-        for meseex_id, meseex in meekz.items():
-            if meseex_id not in terminated_ids and meseex:
-                state['active_jobs'][meseex_id] = {
-                    'name': meseex.name,
-                    'current_task': str(meseex.task) if meseex.task else None,
-                    'current_task_index': meseex.current_task_index if hasattr(meseex, 'current_task_index') else 0,
-                    'n_tasks': meseex.n_tasks if hasattr(meseex, 'n_tasks') else 0,
-                    'progress': meseex.progress,
-                    'runtime_ms': meseex.total_duration_ms,
-                    'task_progress_percent': meseex.task_progress.percent if meseex.task_progress else None,
-                    'task_progress_message': meseex.task_progress.message if meseex.task_progress else None
-                }
-
-        return state
-
-    def update_progress(
-            self,
-            meekz: Dict[str, MrMeseex],
-            task_meekz: Dict[any, Set[str]],
-            completed_meekz: Set[str],
-            failed_meekz: Set[str],
-            cancelled_meekz: Set[str] = None
-    ):
-        """
-        Update the progress display using Rich Panels and Text.
-
-        Args:
-            meekz: Dictionary of meseex_id to Mr. Meseex objects
-            task_meekz: The Mr. Meseex instances in each task by id
-            completed_meekz: Set of completed Mr. Meseex instances
-            failed_meekz: Set of failed Mr. Meseex instances
-            cancelled_meekz: Set of cancelled Mr. Meseex instances
-        """
-        if cancelled_meekz is None:
-            cancelled_meekz = set()
-        # If verbosity is 0, don't show any progress bar
-        if self._progress_verbosity == 0:
+    def track(self, meseex: MrMeseex) -> None:
+        """Subscribe to one job. No-op when verbosity is 0."""
+        if self._verbosity == 0:
             return
+        with self._lock:
+            self._jobs[meseex.meseex_id] = meseex
+        self._unsubs.append(meseex.subscribe(self._on_event, replay=True))
+        if self._interactive:
+            self._ensure_live()
 
-        now = datetime.now(timezone.utc)
-
-        # Update spinner frame index only when verbosity level 2 (with spinners)
-        if self._progress_verbosity >= 2:
-            self._update_spinner()
-
-        # Gather information about task state for quick initial check
-        terminated_ids = completed_meekz.union(failed_meekz).union(cancelled_meekz)
-        all_ids = set(meekz.keys())
-        all_finished = len(terminated_ids) == len(all_ids) and len(all_ids) > 0
-
-        # Create a state digest to detect actual display changes
-        current_state = self._create_display_state_digest(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished)
-
-        # Check if any real change happened (ignore spinner-only updates)
-        is_real_change = self._last_display_state != current_state
-
-        # Throttle the actual Rich update calls for performance (only when verbosity level 2)
-        is_update_due = (self._progress_verbosity >= 2) and (now - self._last_update).total_seconds() >= self._update_interval
-
-        # Update logic depends on verbosity setting:
-        # - Verbosity 2: update for time-based intervals OR real changes (with spinners)
-        # - Verbosity 1: only update for real changes (no spinners)
-        should_update = is_real_change or (self._progress_verbosity >= 2 and is_update_due)
-
-        if not should_update:
-            return
-            
-        # Save current state for future comparisons
-        self._last_display_state = current_state
-        self._last_update = now  # Reset timer for updates
-        self._ensure_display_started()
-
-        # Prepare renderables for display
-        renderables = self._prepare_renderables(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished)
-        
-        # Update the live display
-        self._update_live_display(renderables)
-
-    def _update_live_display(self, renderables: list):
-        """Update the live display with the given renderables."""
+    def stop(self) -> None:
+        """Drop subscribers and close Live."""
+        for unsub in self._unsubs:
+            unsub()
+        self._unsubs.clear()
         if self._live is not None:
-            # Use a Group to manage the panels vertically
-            display_group = Group(*renderables)
-            # Clear the live display before updating to avoid stale content
-            self._live.update(display_group)
+            self._live.stop()
+            self._live = None
 
-    def _prepare_renderables(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz, all_finished):
-        """Prepare renderables for display based on current state."""
-        renderables = []
-        
-        if all_finished:
-            all_completed_panel = self._prepare_all_completed_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
-            if all_completed_panel:
-                renderables.append(all_completed_panel)
-        else:
-            terminated_panel = self._prepare_terminated_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
-            active_panel = self._prepare_active_panel(meekz, terminated_ids)
-            
-            # If both panels exist, show them side by side
-            if terminated_panel and active_panel:
-                # Use Rich Columns to display side by side, with equal width
-                side_by_side = Columns([terminated_panel, active_panel], equal=True, expand=True)
-                renderables.append(side_by_side)
-            elif terminated_panel:
-                renderables.append(terminated_panel)
-            elif active_panel:
-                renderables.append(active_panel)
-        
-        # If no renderables at all, show a message
-        if not renderables:
-            renderables.append(Text("No Meseex jobs currently running or completed."))
-        
-        return renderables
+    def _on_event(self, event: MeseexEvent) -> None:
+        if self._verbosity == 0:
+            return
+        if not self._interactive:
+            self._log(event)
+            return
+        if self._live is not None and not self._animate:
+            self._live.refresh()
 
-    def _prepare_all_completed_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
-        """Prepare panel for when all tasks are completed."""
-        all_terminated_lines = []
-        
-        # If there are too many jobs, show a summary instead
-        if len(terminated_ids) > self._max_detailed_jobs:
-            return self._prepare_summary_completed_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
-        
-        # Sort by name for consistent display
-        for meseex_id in sorted(list(terminated_ids), key=lambda m_id: meekz.get(m_id).name if meekz.get(m_id) else m_id):
-            meseex = meekz.get(meseex_id)
-            if meseex:
-                line = self._create_terminated_job_line(meseex, meseex_id, completed_meekz, cancelled_meekz)
-                all_terminated_lines.append(line)
-        
-        # Add the single "All Tasks Completed" panel
-        if all_terminated_lines:
-            terminated_content = Text("\n").join(all_terminated_lines)
-            return Panel(
-                terminated_content,
-                title="All Tasks Completed",
-                box=box.ROUNDED,
-                border_style="bright_green",
-                expand=True,
-                width=None
-            )
-        return None
+    def _ensure_live(self) -> None:
+        if self._live is not None:
+            return
+        self._live = Live(
+            _ProgressView(self),
+            console=self._console,
+            refresh_per_second=10 if self._animate else 4,
+            transient=False,
+            auto_refresh=self._animate,
+        )
+        self._live.start()
 
-    def _prepare_summary_completed_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
-        """Prepare a summary panel for completed jobs when there are many jobs."""
-        # Calculate statistics for completed jobs
-        total_jobs = len(terminated_ids)
-        completed_jobs = len(completed_meekz)
-        failed_jobs = len(failed_meekz)
-        cancelled_jobs = len(cancelled_meekz)
-        
-        # Calculate average runtime
-        total_runtime = 0
-        max_runtime = 0
-        min_runtime = float('inf')
-        
-        # Group by task type
-        task_counts = Counter()
-        
-        for meseex_id in terminated_ids:
-            meseex = meekz.get(meseex_id)
-            if meseex:
-                runtime = meseex.total_duration_ms
-                total_runtime += runtime
-                max_runtime = max(max_runtime, runtime)
-                min_runtime = min(min_runtime, runtime)
-                
-                # Count by task type
-                task_type = str(meseex.tasks[0]) if meseex.tasks else "unknown"
-                task_counts[task_type] += 1
-        
-        avg_runtime = total_runtime / total_jobs if total_jobs > 0 else 0
-        
-        # Create summary table
+    def _spinner(self) -> str:
+        if not self._animate:
+            return "..."
+        index = int(time.monotonic() / SPINNER_PERIOD_S) % len(SPINNER_FRAMES)
+        return SPINNER_FRAMES[index]
+
+    def _snapshot(self) -> List[MrMeseex]:
+        with self._lock:
+            return list(self._jobs.values())
+
+    def _render(self):
+        jobs = self._snapshot()
+        if not jobs:
+            return Text("No Meseex jobs currently running or completed.")
+        terminated = [job for job in jobs if job.is_terminal]
+        active = [job for job in jobs if not job.is_terminal]
+        if jobs and not active:
+            panel = self._all_done_panel(terminated)
+            return panel or Text("No Meseex jobs currently running or completed.")
+        done_panel = self._terminated_panel(terminated)
+        active_panel = self._active_panel(active)
+        if done_panel and active_panel:
+            return Columns([done_panel, active_panel], equal=True, expand=True)
+        return done_panel or active_panel or Text("No Meseex jobs currently running or completed.")
+
+    def _all_done_panel(self, terminated: List[MrMeseex]):
+        if len(terminated) > _MAX_DETAILED_JOBS:
+            return self._completed_summary(terminated)
+        lines = [self._terminated_line(job) for job in sorted(terminated, key=lambda job: job.name)]
+        if not lines:
+            return None
+        return Panel(
+            Text("\n").join(lines),
+            title="All Tasks Completed",
+            box=box.ROUNDED,
+            border_style="bright_green",
+            expand=True,
+        )
+
+    def _completed_summary(self, terminated: List[MrMeseex]):
+        total = len(terminated)
+        completed = sum(1 for job in terminated if job.termination_state is TerminationState.SUCCESS)
+        failed = sum(1 for job in terminated if job.termination_state is TerminationState.FAILED)
+        cancelled = sum(1 for job in terminated if job.termination_state is TerminationState.CANCELLED)
+        runtimes = [job.total_duration_ms for job in terminated]
+        avg = sum(runtimes) / total if total else 0
         table = Table(box=box.MINIMAL)
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
-        
-        table.add_row("Total Jobs", str(total_jobs))
-        table.add_row("Completed", f"{completed_jobs} ({completed_jobs/total_jobs*100:.1f}%)")
-        table.add_row("Failed", f"{failed_jobs} ({failed_jobs/total_jobs*100:.1f}%)")
-        table.add_row("Cancelled", f"{cancelled_jobs} ({cancelled_jobs/total_jobs*100:.1f}%)")
-        table.add_row("Avg Runtime", self._format_duration_ms(avg_runtime))
-        table.add_row("Max Runtime", self._format_duration_ms(max_runtime))
-        table.add_row("Min Runtime", self._format_duration_ms(min_runtime))
-        
-        # Add task type distribution
+        table.add_row("Total Jobs", str(total))
+        table.add_row("Completed", f"{completed} ({_pct(completed, total)})")
+        table.add_row("Failed", f"{failed} ({_pct(failed, total)})")
+        table.add_row("Cancelled", f"{cancelled} ({_pct(cancelled, total)})")
+        table.add_row("Avg Runtime", _format_duration_ms(avg))
+        table.add_row("Max Runtime", _format_duration_ms(max(runtimes) if runtimes else 0))
+        table.add_row("Min Runtime", _format_duration_ms(min(runtimes) if runtimes else 0))
+        task_counts = Counter()
+        for job in terminated:
+            task_counts[str(job.tasks[0]) if job.tasks else "unknown"] += 1
         task_table = Table(title="Task Distribution", box=box.MINIMAL)
         task_table.add_column("Task Type", style="cyan")
         task_table.add_column("Count", style="green")
-        
-        # Show top 5 task types
         for task_type, count in task_counts.most_common(5):
-            task_table.add_row(task_type, f"{count} ({count/total_jobs*100:.1f}%)")
-        
-        summary_group = Group(
-            Text("Job Summary", style="bold cyan"),
-            table,
-            task_table
-        )
-        
+            task_table.add_row(task_type, f"{count} ({_pct(count, total)})")
         return Panel(
-            summary_group,
-            title=f"Completed Jobs Summary (Total: {total_jobs})",
+            Group(Text("Job Summary", style="bold cyan"), table, task_table),
+            title=f"Completed Jobs Summary (Total: {total})",
             box=box.ROUNDED,
             border_style="bright_green",
-            expand=True,  # Expand to fill available width
-            width=None  # Allow width to be determined by parent container
+            expand=True,
         )
 
-    def _prepare_terminated_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
-        """Prepare panel for terminated jobs."""
-        terminated_lines = []
-        
-        # If there are too many jobs, show a summary instead
-        if len(terminated_ids) > self._max_detailed_jobs:
-            return self._prepare_summary_terminated_panel(meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz)
-        
-        # Sort by name for consistent display
-        for meseex_id in sorted(list(terminated_ids), key=lambda m_id: meekz.get(m_id).name if meekz.get(m_id) else m_id):
-            meseex = meekz.get(meseex_id)
-            if meseex:
-                line = self._create_terminated_job_line(meseex, meseex_id, completed_meekz, cancelled_meekz)
-                terminated_lines.append(line)
+    def _terminated_panel(self, terminated: List[MrMeseex]):
+        if not terminated:
+            return None
+        if len(terminated) > _MAX_DETAILED_JOBS:
+            return self._terminated_summary(terminated)
+        lines = [self._terminated_line(job) for job in sorted(terminated, key=lambda job: job.name)]
+        return Panel(
+            Text("\n").join(lines),
+            title="Terminated Jobs",
+            box=box.ROUNDED,
+            border_style="dim",
+            expand=True,
+        )
 
-        if terminated_lines:
-            terminated_content = Text("\n").join(terminated_lines)
-            return Panel(
-                terminated_content,
-                title="Terminated Jobs",
-                box=box.ROUNDED,
-                border_style="dim",
-                expand=True,
-                width=None
-            )
-        return None
-
-    def _prepare_summary_terminated_panel(self, meekz, terminated_ids, completed_meekz, failed_meekz, cancelled_meekz):
-        """Prepare a summary panel for terminated jobs when there are many jobs."""
-        # Similar to _prepare_summary_completed_panel but for terminated jobs
-        total_terminated = len(terminated_ids)
-        completed = len(completed_meekz)
-        failed = len(failed_meekz)
-        cancelled = len(cancelled_meekz)
-        
+    def _terminated_summary(self, terminated: List[MrMeseex]):
+        total = len(terminated)
+        completed = [job for job in terminated if job.termination_state is TerminationState.SUCCESS]
+        failed = [job for job in terminated if job.termination_state is TerminationState.FAILED]
+        cancelled = [job for job in terminated if job.termination_state is TerminationState.CANCELLED]
         table = Table(box=box.MINIMAL)
         table.add_column("Status", style="cyan")
         table.add_column("Count", style="green")
         table.add_column("Percentage", style="magenta")
-        
-        table.add_row("Completed", str(completed), f"{completed/total_terminated*100:.1f}%")
-        table.add_row("Failed", str(failed), f"{failed/total_terminated*100:.1f}%")
-        table.add_row("Cancelled", str(cancelled), f"{cancelled/total_terminated*100:.1f}%")
-        
-        # Show most recent 5 completed and failed jobs
-        recent_completed = []
-        recent_failed = []
-        recent_cancelled = []
-        
-        for meseex_id in terminated_ids:
-            meseex = meekz.get(meseex_id)
-            if not meseex:
-                continue
-                
-            if meseex_id in completed_meekz:
-                recent_completed.append((meseex, meseex.total_duration_ms))
-            elif meseex_id in failed_meekz:
-                recent_failed.append((meseex, meseex.total_duration_ms))
-            else:
-                recent_cancelled.append((meseex, meseex.total_duration_ms))
-        
-        # Sort by most recent (highest duration)
-        recent_completed.sort(key=lambda x: x[1], reverse=True)
-        recent_failed.sort(key=lambda x: x[1], reverse=True)
-        recent_cancelled.sort(key=lambda x: x[1], reverse=True)
-        
-        recent_table = Table(title="Most Recent Jobs", box=box.MINIMAL)
-        recent_table.add_column("Name", style="cyan")
-        recent_table.add_column("Status", style="green")
-        recent_table.add_column("Runtime", style="magenta")
-        
-        # Add most recent completions
-        for meseex, _ in recent_completed[:3]:
-            recent_table.add_row(
-                meseex.name,
-                "✓ Completed",
-                self._format_duration_ms(meseex.total_duration_ms)
-            )
-            
-        # Add most recent failures
-        for meseex, _ in recent_failed[:2]:
-            recent_table.add_row(
-                meseex.name,
-                "✗ Failed",
-                self._format_duration_ms(meseex.total_duration_ms)
-            )
-
-        # Add most recent cancellations
-        for meseex, _ in recent_cancelled[:2]:
-            recent_table.add_row(
-                meseex.name,
-                "⊘ Cancelled",
-                self._format_duration_ms(meseex.total_duration_ms)
-            )
-        
-        summary_group = Group(
-            table,
-            recent_table
-        )
-        
+        table.add_row("Completed", str(len(completed)), _pct(len(completed), total))
+        table.add_row("Failed", str(len(failed)), _pct(len(failed), total))
+        table.add_row("Cancelled", str(len(cancelled)), _pct(len(cancelled), total))
+        recent = Table(title="Most Recent Jobs", box=box.MINIMAL)
+        recent.add_column("Name", style="cyan")
+        recent.add_column("Status", style="green")
+        recent.add_column("Runtime", style="magenta")
+        for job in sorted(completed, key=lambda item: item.total_duration_ms, reverse=True)[:3]:
+            recent.add_row(job.name, "✓ Completed", _format_duration_ms(job.total_duration_ms))
+        for job in sorted(failed, key=lambda item: item.total_duration_ms, reverse=True)[:2]:
+            recent.add_row(job.name, "✗ Failed", _format_duration_ms(job.total_duration_ms))
+        for job in sorted(cancelled, key=lambda item: item.total_duration_ms, reverse=True)[:2]:
+            recent.add_row(job.name, "⊘ Cancelled", _format_duration_ms(job.total_duration_ms))
         return Panel(
-            summary_group,
-            title=f"Terminated Jobs Summary (Total: {total_terminated})",
+            Group(table, recent),
+            title=f"Terminated Jobs Summary (Total: {total})",
             box=box.ROUNDED,
             border_style="dim",
-            expand=True,  # Expand to fill available width
-            width=None  # Allow width to be determined by parent container
+            expand=True,
         )
 
-    def _create_terminated_job_line(self, meseex, meseex_id, completed_meekz, cancelled_meekz):
-        """Create a line for a terminated job."""
-        run_time = self._format_duration_ms(meseex.total_duration_ms)
-        
-        if meseex_id in completed_meekz:
+    def _terminated_line(self, job: MrMeseex) -> Text:
+        run_time = _format_duration_ms(job.total_duration_ms)
+        if job.termination_state is TerminationState.SUCCESS:
             status = Text("✓ Completed", style="green")
-            msg = ""
-        elif meseex_id in cancelled_meekz:
+            extra = ""
+        elif job.termination_state is TerminationState.CANCELLED:
             status = Text("⊘ Cancelled", style="yellow")
-            msg = ""
-        else: # Failed
+            extra = ""
+        else:
             status = Text("✗ Failed", style="red")
-            msg = self._format_error(meseex.error)
-        
+            extra = _format_error(job.error)
         return Text.assemble(
-            (f"{meseex.name:<20} ", "cyan"),
+            (f"{job.name:<20} ", "cyan"),
             status,
             (f" Runtime: {run_time:<10}", "magenta"),
-            (f" {msg}", "yellow")
+            (f" {extra}", "yellow"),
         )
 
-    def _prepare_active_panel(self, meekz, terminated_ids):
-        """Prepare panel for active jobs."""
-        active_lines = []
-        active_meekz_list = []
-        
-        # Process active jobs by checking if they're actually active (not terminated)
-        for meseex_id, meseex in meekz.items():
-            if meseex_id not in terminated_ids and meseex:
-                active_meekz_list.append(meseex)
-        
-        # Sort by name for consistent display
-        active_meekz_list.sort(key=lambda m: m.name)
-        
-        # If there are too many active jobs, use the summary view
-        if len(active_meekz_list) > self._max_detailed_jobs:
-            return self._prepare_summary_active_panel(active_meekz_list)
-        
-        for meseex in active_meekz_list:
-            line = self._create_active_job_line(meseex)
-            active_lines.append(line)
-
-        if active_lines:
-            active_content = Text("\n").join(active_lines)
-            return Panel(
-                active_content,
-                title="Active Jobs",
-                box=box.ROUNDED,
-                border_style="blue",
-                expand=True,
-                width=None
-            )
-        return None
-
-    def _prepare_summary_active_panel(self, active_meekz_list: List[MrMeseex]):
-        """Prepare a summary panel for active jobs when there are many jobs."""
-        total_active = len(active_meekz_list)
-        
-        # Group jobs by task
-        task_groups = defaultdict(list)
-        for meseex in active_meekz_list:
-            current_task = str(meseex.task) if isinstance(meseex.task, str) else f"Task {meseex.task}"
-            task_groups[current_task].append(meseex)
-        
-        # Calculate average progress
-        avg_progress = sum(meseex.progress for meseex in active_meekz_list) / total_active if total_active > 0 else 0
-        
-        # Create progress bar for overall progress
-        overall_width = 20  # Reduced for side-by-side view
-        filled = int(overall_width * avg_progress)
-        overall_bar = f"[{'=' * filled}{' ' * (overall_width - filled)}] {avg_progress * 100:.1f}%"
-        
-        # Create task distribution table
-        task_table = Table(box=box.MINIMAL)
-        task_table.add_column("Task", style="cyan")
-        task_table.add_column("Count", style="green")
-        task_table.add_column("Avg Progress", style="magenta")
-        
-        for task, task_meekz in sorted(task_groups.items()):
-            task_avg_progress = sum(m.progress for m in task_meekz) / len(task_meekz)
-            task_bar_width = 10  # Reduced for side-by-side view
-            task_filled = int(task_bar_width * task_avg_progress)
-            task_bar = f"[{'=' * task_filled}{' ' * (task_bar_width - task_filled)}] {task_avg_progress * 100:.1f}%"
-            
-            task_table.add_row(
-                task,
-                str(len(task_meekz)),
-                task_bar
-            )
-        
-        # Create spinner or static indicator based on verbosity setting
-        if self._progress_verbosity >= 2:
-            spinner = self.SPINNER_FRAMES[self._spinner_frame]
-            processing_text = f"\n{spinner} Processing {total_active} active jobs..."
-        else:
-            processing_text = f"\nProcessing {total_active} active jobs..."
-
-        summary_group = Group(
-            Text.assemble(
-                ("Overall Progress: ", "bold cyan"),
-                (overall_bar, "green")
-            ),
-            Text("\nActive Jobs by Task:", style="bold cyan"),
-            task_table,
-            Text.assemble(
-                (processing_text, "yellow")
-            )
-        )
-        
+    def _active_panel(self, active: List[MrMeseex]):
+        if not active:
+            return None
+        active = sorted(active, key=lambda job: job.name)
+        if len(active) > _MAX_DETAILED_JOBS:
+            return self._active_summary(active)
+        lines = [self._active_line(job) for job in active]
         return Panel(
-            summary_group,
-            title=f"Active Jobs Summary (Total: {total_active})",
+            Text("\n").join(lines),
+            title="Active Jobs",
             box=box.ROUNDED,
             border_style="blue",
-            expand=True,  # Expand to fill available width
-            width=None  # Allow width to be determined by parent container
+            expand=True,
         )
 
-    def _create_active_job_line(self, meseex):
-        """Create a line for an active job."""
-        name = meseex.name
-        current_task = str(meseex.task) if isinstance(meseex.task, str) else f"Task {meseex.task}"
-        task_display = f"{current_task} ({meseex.current_task_index + 1}/{meseex.n_tasks})"
-        progress_display = self._create_progress_display(meseex)
-        running_time = self._format_duration_ms(meseex.total_duration_ms)
-        total_progress = f"{meseex.progress * 100:.1f}%"
-        message = meseex.task_progress.message if meseex.task_progress and meseex.task_progress.message else ""
-        
+    def _active_summary(self, active: List[MrMeseex]):
+        total = len(active)
+        groups = defaultdict(list)
+        for job in active:
+            groups[_task_label(job)].append(job)
+        avg = sum(job.progress for job in active) / total if total else 0
+        overall = _bar(avg, 20)
+        table = Table(box=box.MINIMAL)
+        table.add_column("Task", style="cyan")
+        table.add_column("Count", style="green")
+        table.add_column("Avg Progress", style="magenta")
+        for task, group in sorted(groups.items()):
+            task_avg = sum(job.progress for job in group) / len(group)
+            table.add_row(task, str(len(group)), _bar(task_avg, 10))
+        processing = f"\n{self._spinner()} Processing {total} active jobs..." if self._animate else f"\nProcessing {total} active jobs..."
+        return Panel(
+            Group(
+                Text.assemble(("Overall Progress: ", "bold cyan"), (overall, "green")),
+                Text("\nActive Jobs by Task:", style="bold cyan"),
+                table,
+                Text(processing, style="yellow"),
+            ),
+            title=f"Active Jobs Summary (Total: {total})",
+            box=box.ROUNDED,
+            border_style="blue",
+            expand=True,
+        )
+
+    def _active_line(self, job: MrMeseex) -> Text:
+        task_display = f"{_task_label(job)} ({job.current_task_index + 1}/{job.n_tasks})"
+        message = job.task_progress.message if job.task_progress and job.task_progress.message else ""
         return Text.assemble(
-            (f"{name:<20} ", "cyan"),
+            (f"{job.name:<20} ", "cyan"),
             (f"Task: {task_display:<20} ", "green"),
-            (f"Progress: {progress_display:<25} ", "default"),
-            (f"Running: {running_time:<10} ", "magenta"),
-            (f"Total: {total_progress:<8} ", "blue"),
-            (f"{message}", "yellow")
+            (f"Progress: {self._task_progress_display(job):<25} ", "default"),
+            (f"Running: {_format_duration_ms(job.total_duration_ms):<10} ", "magenta"),
+            (f"Total: {job.progress * 100:.1f}%{'':<3} ", "blue"),
+            (message, "yellow"),
         )
 
-    def _create_progress_display(self, meseex: MrMeseex) -> str:
-        """Creates either a progress bar or spinner for task progress."""
-        if meseex.task_progress and meseex.task_progress.percent is not None and meseex.task_progress.percent > 0.0:
-            # Create a mini progress bar
-            percent = meseex.task_progress.percent
-            width = 15 # Reduced width for text display
-            filled = int(width * percent)
-            bar = f"[{'=' * filled}{' ' * (width - filled)}] {percent * 100:.1f}%"
-            return bar
-        else:
-            # Show spinner or static indicator based on verbosity setting
-            if self._progress_verbosity >= 2:
-                spinner = self.SPINNER_FRAMES[self._spinner_frame]
-                return f"{spinner} working..."
-            else:
-                return "... working"
-    
-    def stop(self):
-        """Stops the Rich Live display cleanly."""
-        if self._live:
-            self._live.stop()
-            self._live = None
-        # Clear internal tracking
-        self._completed_shown.clear()
-        self._failed_shown.clear()
+    def _task_progress_display(self, job: MrMeseex) -> str:
+        current = job.task_progress
+        if current is not None and current.percent is not None and current.percent > 0.0:
+            return _bar(current.percent, 15)
+        if self._animate:
+            return f"{self._spinner()} working..."
+        return "... working"
 
-    def _format_error(self, error: Optional[Exception]) -> str:
-        """Formats error messages for display."""
-        if not error:
-            return ""
-        error_msg = str(error)
-        # Add task info if available and not already in message
-        if hasattr(error, 'task') and error.task:
-            task_str = str(error.task)
-            if f"Task '{task_str}'" not in error_msg and task_str not in error_msg:
-                error_msg = f"Task '{task_str}': {error_msg}"
-        # Limit error message length
-        max_len = 200
-        if len(error_msg) > max_len:
-            error_msg = error_msg[:max_len - 3] + "..."
-        return error_msg
+    def _log(self, event: MeseexEvent) -> None:
+        job = self._jobs.get(event.meseex_id)
+        name = job.name if job is not None else event.meseex_id
+        kind = event.kind.value
+        if event.kind is EventKind.STARTED:
+            self._console.print(f"meseex {kind:<11} {name}  task={event.task}")
+        elif event.kind is EventKind.TASK_CHANGED:
+            self._console.print(f"meseex {kind:<11} {name}  task={event.task}")
+        elif event.kind is EventKind.PROGRESS:
+            percent = f"{event.task_progress * 100:.0f}%" if event.task_progress is not None else ""
+            message = event.message or ""
+            self._console.print(f"meseex {kind:<11} {name}  {percent}  {message}".rstrip())
+        elif event.kind is EventKind.SUCCEEDED:
+            runtime = _format_duration_ms(job.total_duration_ms) if job is not None else ""
+            self._console.print(f"meseex {kind:<11} {name}  {runtime}")
+        elif event.kind is EventKind.FAILED:
+            self._console.print(f"meseex {kind:<11} {name}  {_format_error(event.error)}")
+        elif event.kind is EventKind.CANCELLED:
+            runtime = _format_duration_ms(job.total_duration_ms) if job is not None else ""
+            self._console.print(f"meseex {kind:<11} {name}  {runtime}")
 
-    def _format_duration_ms(self, duration_ms: float) -> str:
-        """Format millisecond duration in a human-readable format"""
-        if duration_ms is None:
-            return "n/a"
-            
-        # Convert to seconds
-        duration = duration_ms / 1000.0
-        
-        if duration < 60:
-            return f"{duration:.1f}s"
-        elif duration < 3600:
-            m, s = divmod(int(duration), 60)
-            return f"{m}m {s}s"
-        else:
-            h, rem = divmod(int(duration), 3600)
-            m, _ = divmod(rem, 60)
-            return f"{h}h {m}m"
+
+class _ProgressView:
+    """Rich renderable that reads live job objects and a clock-driven spinner."""
+
+    def __init__(self, bar: ProgressBar):
+        self._bar = bar
+
+    def __rich__(self):
+        return self._bar._render()
+
+
+def _task_label(job: MrMeseex) -> str:
+    return job.task if isinstance(job.task, str) else f"Task {job.task}"
+
+
+def _bar(percent: float, width: int) -> str:
+    filled = int(width * max(0.0, min(1.0, percent)))
+    return f"[{'=' * filled}{' ' * (width - filled)}] {percent * 100:.1f}%"
+
+
+def _pct(part: int, total: int) -> str:
+    if total <= 0:
+        return "0.0%"
+    return f"{part / total * 100:.1f}%"
+
+
+def _format_error(error: Optional[BaseException]) -> str:
+    if not error:
+        return ""
+    text = str(error)
+    task = getattr(error, "task", None)
+    if task and f"Task '{task}'" not in text and str(task) not in text:
+        text = f"Task '{task}': {text}"
+    if len(text) > 200:
+        return text[:197] + "..."
+    return text
+
+
+def _format_duration_ms(duration_ms: float) -> str:
+    if duration_ms is None:
+        return "n/a"
+    duration = duration_ms / 1000.0
+    if duration < 60:
+        return f"{duration:.1f}s"
+    if duration < 3600:
+        minutes, seconds = divmod(int(duration), 60)
+        return f"{minutes}m {seconds}s"
+    hours, rem = divmod(int(duration), 3600)
+    minutes, _ = divmod(rem, 60)
+    return f"{hours}h {minutes}m"
